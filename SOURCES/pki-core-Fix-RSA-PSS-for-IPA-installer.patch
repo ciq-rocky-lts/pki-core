@@ -1,0 +1,37 @@
+From 0d68b11baa49673a8f43cf1e4f325427ab2066da Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Mon, 30 Mar 2020 20:40:50 -0400
+Subject: [PATCH] Minor fix to appease ipa install. The code in question was
+ getting (#364)
+
+an algorithmId name with trailing whitespace, which was not recognized.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit 53de751485b04fe2a1555228342ed642c9a9e347)
+---
+ .../cms/src/com/netscape/cms/profile/def/SigningAlgDefault.java    | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/base/server/cms/src/com/netscape/cms/profile/def/SigningAlgDefault.java b/base/server/cms/src/com/netscape/cms/profile/def/SigningAlgDefault.java
+index 97f221e..a0d0d33 100644
+--- a/base/server/cms/src/com/netscape/cms/profile/def/SigningAlgDefault.java
++++ b/base/server/cms/src/com/netscape/cms/profile/def/SigningAlgDefault.java
+@@ -119,9 +119,14 @@ public class SigningAlgDefault extends EnrollDefault {
+         }
+         if (name.equals(VAL_ALGORITHM)) {
+             try {
++                String newValue = value;
++                if(newValue != null) {
++                    newValue = newValue.trim();
++                }
++                CMS.debug("SigningAlgDefault: setValue value: " + newValue);
+                 info.set(X509CertInfo.ALGORITHM_ID,
+                         new CertificateAlgorithmId(
+-                                AlgorithmId.get(value)));
++                                AlgorithmId.get(newValue)));
+             } catch (Exception e) {
+                 CMS.debug("SigningAlgDefault: setValue " + e.toString());
+                 throw new EPropertyException(CMS.getUserMessage(
+-- 
+1.8.3.1
+

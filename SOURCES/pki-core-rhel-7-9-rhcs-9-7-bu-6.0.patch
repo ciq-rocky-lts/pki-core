@@ -1,0 +1,119 @@
+From 54a1664ddd7b6b2a8b2a0c7f0eec403507c246c1 Mon Sep 17 00:00:00 2001
+From: Jack Magne <jmagne@test.host.com>
+Date: Thu, 15 Apr 2021 18:42:31 -0400
+Subject: [PATCH 1/2] pkispawn fails against 389-ds 1.4.3.19 #3458 (#3465)
+
+    Add suggested patch from stanislavlevin to solve this issue.
+    Also add f34 to the ipa tests,this time really add the tests.
+    Upon further review, back out of f34 tests until the infractructure
+    supports it.
+
+    Also hardcode tomcat app setting in spec file for the moment to
+    avoid possible glitches on certain platform.
+
+    Co-authored-by: Jack Magne <jmagne@localhost.localdomain>
+
+(cherry picked from commit 9e1ef2557403d1a5117858322af0ae7fc1f4fd44)
+---
+ .../src/com/netscape/cmscore/apps/CMSEngine.java     | 20 +++++++++-----------
+ 1 file changed, 9 insertions(+), 11 deletions(-)
+
+diff --git a/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java b/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
+index 08e6f8d..db341d5 100644
+--- a/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
++++ b/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
+@@ -287,9 +287,8 @@ public class CMSEngine implements ICMSEngine {
+ 
+     private static final int PW_OK =0;
+     private static final int PW_BAD_SETUP = 1;
+-    private static final int PW_INVALID_PASSWORD = 2;
++    private static final int PW_INVALID_CREDENTIALS = 2;
+     private static final int PW_CANNOT_CONNECT = 3;
+-    private static final int PW_NO_USER = 4;
+     private static final int PW_MAX_ATTEMPTS = 3;
+ 
+ 
+@@ -365,7 +364,7 @@ public class CMSEngine implements ICMSEngine {
+ 
+         for (String tag : tags) {
+             int iteration = 0;
+-            int result = PW_INVALID_PASSWORD;
++            int result = PW_INVALID_CREDENTIALS;
+             String binddn;
+             String authType;
+             LdapConnInfo connInfo = null;
+@@ -450,10 +449,10 @@ public class CMSEngine implements ICMSEngine {
+                 String passwd = mPasswordStore.getPassword(tag, iteration);
+                 result = testLDAPConnection(tag, connInfo, binddn, passwd);
+                 iteration++;
+-            } while ((result == PW_INVALID_PASSWORD) && (iteration < PW_MAX_ATTEMPTS));
++            } while ((result == PW_INVALID_CREDENTIALS) && (iteration < PW_MAX_ATTEMPTS));
+ 
+             if (result != PW_OK) {
+-                if ((result == PW_NO_USER) && (tag.equals("replicationdb"))) {
++                if ((result == PW_INVALID_CREDENTIALS) && (tag.equals("replicationdb"))) {
+                     System.out.println(
+                         "CMSEngine: init(): password test execution failed for replicationdb" +
+                         "with NO_SUCH_USER.  This may not be a latest instance.  Ignoring ..");
+@@ -473,8 +472,10 @@ public class CMSEngine implements ICMSEngine {
+     public int testLDAPConnection(String name, LdapConnInfo info, String binddn, String pwd) {
+         int ret = PW_OK;
+ 
+-        if (StringUtils.isEmpty(pwd))
+-            return PW_INVALID_PASSWORD;
++        if (StringUtils.isEmpty(pwd)) {
++            return PW_INVALID_CREDENTIALS;
++        }
++
+ 
+         String host = info.getHost();
+         int port = info.getPort();
+@@ -488,12 +489,9 @@ public class CMSEngine implements ICMSEngine {
+         } catch (LDAPException e) {
+             switch (e.getLDAPResultCode()) {
+             case LDAPException.NO_SUCH_OBJECT:
+-                System.out.println("testLDAPConnection: The specified user " + binddn + " does not exist");
+-                ret = PW_NO_USER;
+-                break;
+             case LDAPException.INVALID_CREDENTIALS:
+                 System.out.println("testLDAPConnection: Invalid Password");
+-                ret = PW_INVALID_PASSWORD;
++                ret = PW_INVALID_CREDENTIALS;
+                 break;
+             default:
+                 System.out.println("testLDAPConnection: Unable to connect to " + name + ": " + e);
+-- 
+1.8.3.1
+
+
+From d511e7f255350881333b14ba9b68a879335abddc Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 21 Apr 2021 17:32:42 -0700
+Subject: [PATCH 2/2] bug1949656 CRMF requests with non-SKID extensions
+
+This patch address the issue where if a CRMF request bears any extension
+other than SKID then it fails to process.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1949656
+
+(cherry picked from commit fe133f9affcde7b56fe69bf0c7daef6930749e74)
+---
+ base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java b/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java
+index f9903c6..b7fdb9e 100644
+--- a/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java
++++ b/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java
+@@ -2286,7 +2286,7 @@ public abstract class EnrollProfile extends BasicProfile
+                         ext = new SubjectKeyIdentifierExtension(false,
+                                 jssext.getExtnValue().toByteArray());
+                     } else {
+-                        new Extension(oid, isCritical, extValue);
++                        ext = new Extension(oid, isCritical, extValue);
+                     }
+ 
+                     extensions.parseExtension(ext);
+-- 
+1.8.3.1
+

@@ -1,0 +1,760 @@
+From 6b5c8073187a69c09000e88394465228f08d64be Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 28 Apr 2021 16:26:46 -0700
+Subject: [PATCH 1/4] Bug1911472 Revoke via REST API not working when Agent
+ certificate not issued by CA
+
+This patch resolves the issue that when a client cert is issued by an
+external CA, the revocation check inside the CA REST service handler
+(ca/src/org/dogtagpki/server/ca/rest/CertService.java)
+assumes that all client certs are issued by this CA.
+The fix is to check the issuer, and add an option, allowExtCASignedAgentCerts
+to allow for external CA signed agent certs.
+If the issuer is external, and ca.allowExtCASignedAgentCerts is true, then the
+internal cert status check is bypassed and to rely on OCSP enablement
+(enableOCSP) in server.xml.
+The ca.allowExtCASignedAgentCerts config param currently is only used in
+the rest revocation case.  It is not used anywhere else (not even unrevocation).
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1911472
+
+(cherry picked from commit 62f680f98e5bf9a3e6d44279fcc735e65c6d8d91)
+---
+ .../src/com/netscape/ca/CertificateAuthority.java  |  6 ++++
+ .../org/dogtagpki/server/ca/rest/CertService.java  | 38 +++++++++++++++++++---
+ .../netscape/certsrv/ca/ICertificateAuthority.java |  2 ++
+ 3 files changed, 41 insertions(+), 5 deletions(-)
+
+diff --git a/base/ca/src/com/netscape/ca/CertificateAuthority.java b/base/ca/src/com/netscape/ca/CertificateAuthority.java
+index bd99344..c519a5a 100644
+--- a/base/ca/src/com/netscape/ca/CertificateAuthority.java
++++ b/base/ca/src/com/netscape/ca/CertificateAuthority.java
+@@ -333,6 +333,7 @@ public class CertificateAuthority
+ 
+     private boolean mByName = true;
+ 
++    private boolean mAllowExtCASignedAgentCerts = false;
+     private boolean mUseNonces = true;
+     private int mMaxNonces = 100;
+ 
+@@ -454,6 +455,10 @@ public class CertificateAuthority
+         return mPolicy.getPolicyProcessor();
+     }
+ 
++    public boolean allowExtCASignedAgentCerts() {
++        return mAllowExtCASignedAgentCerts;
++    }
++
+     public boolean noncesEnabled() {
+         return mUseNonces;
+     }
+@@ -574,6 +579,7 @@ public class CertificateAuthority
+             if (initSigUnitSucceeded)
+                 checkForNewerCert();
+ 
++            mAllowExtCASignedAgentCerts = mConfig.getBoolean("allowExtCASignedAgentCerts", false);
+             mUseNonces = mConfig.getBoolean("enableNonces", true);
+             mMaxNonces = mConfig.getInteger("maxNumberOfNonces", 100);
+ 
+diff --git a/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java b/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java
+index 000ce32..74d3a5d 100644
+--- a/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java
++++ b/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java
+@@ -44,6 +44,7 @@ import netscape.security.x509.AlgorithmId;
+ import netscape.security.x509.CRLExtensions;
+ import netscape.security.x509.CRLReasonExtension;
+ import netscape.security.x509.RevocationReason;
++import netscape.security.x509.X500Name;
+ import netscape.security.x509.X509CertImpl;
+ import netscape.security.x509.X509ExtensionException;
+ import netscape.security.x509.X509Key;
+@@ -172,6 +173,8 @@ public class CertService extends PKIService implements CertResource {
+             return unrevokeCert(id);
+         }
+ 
++        String caIssuerDN = null;
++        X500Name caX500DN = null;
+         RevocationProcessor processor;
+         try {
+             processor = new RevocationProcessor("caDoRevoke-agent", getLocale(headers));
+@@ -190,6 +193,8 @@ public class CertService extends PKIService implements CertResource {
+ 
+             processor.setAuthority(authority);
+ 
++            caX500DN = (X500Name) authority.getCACert().getIssuerDN();
++
+         } catch (EBaseException e) {
+             throw new PKIException(e.getMessage());
+         }
+@@ -209,12 +214,35 @@ public class CertService extends PKIService implements CertResource {
+             if (clientCert != null) {
+                 clientSerialNumber = clientCert.getSerialNumber();
+                 clientSubjectDN = clientCert.getSubjectDN().toString();
+-                clientRecord = processor.getCertificateRecord(clientSerialNumber);
+ 
+-                // Verify client cert is not revoked.
+-                // TODO: This should be checked during authentication.
+-                if (clientRecord.getStatus().equals(ICertRecord.STATUS_REVOKED)) {
+-                    throw new UnauthorizedException(CMS.getLogMessage("CMSGW_UNAUTHORIZED"));
++                X500Name x500issuerDN = (X500Name) clientCert.getIssuerDN();
++                /*
++                 * internal revocation check only to be conducted for certs
++                 * issued by this CA
++                 * For client certs issued by external CAs, TLS mutual auth
++                 * would have completed the authenticaton/verification if
++                 * OCSP was enabled;
++                 * Furthermore, prior to the actual revocation, client cert
++                 * is mapped against the agent group database for proper
++                 * privilege regardless of the issuer.
++                 */
++                if (x500issuerDN.equals(caX500DN)) {
++                    CMS.debug("CertService.revokeCert: client cert issued by this CA");
++                    clientRecord = processor.getCertificateRecord(clientSerialNumber);
++
++                    // Verify client cert is not revoked.
++                    // TODO: This should be checked during authentication.
++                    if (clientRecord.getStatus().equals(ICertRecord.STATUS_REVOKED)) {
++                        throw new UnauthorizedException(CMS.getLogMessage("CMSGW_UNAUTHORIZED"));
++                    }
++                } else {
++                    CMS.debug("CertService.revokeCert: client cert not issued by this CA");
++                    if (!authority.allowExtCASignedAgentCerts()) {
++                        CMS.debug("CertService.revokeCert: allowExtCASignedAgentCerts false;");
++                        throw new UnauthorizedException(CMS.getLogMessage("CMSGW_UNAUTHORIZED"));
++                    } else {
++                        CMS.debug("CertService.revokeCert: allowExtCASignedAgentCerts true;");
++                    }
+                 }
+             }
+ 
+diff --git a/base/common/src/com/netscape/certsrv/ca/ICertificateAuthority.java b/base/common/src/com/netscape/certsrv/ca/ICertificateAuthority.java
+index d941624..c5604e3 100644
+--- a/base/common/src/com/netscape/certsrv/ca/ICertificateAuthority.java
++++ b/base/common/src/com/netscape/certsrv/ca/ICertificateAuthority.java
+@@ -136,6 +136,8 @@ public interface ICertificateAuthority extends ISubsystem {
+      */
+     public IPolicyProcessor getPolicyProcessor();
+ 
++    public boolean allowExtCASignedAgentCerts();
++
+     public boolean noncesEnabled();
+ 
+     public Map<Object, Long> getNonces(HttpServletRequest request, String name);
+-- 
+1.8.3.1
+
+
+From a2599f832ed3036f84d507dce36548e0ca1351d0 Mon Sep 17 00:00:00 2001
+From: Jack Magne <jmagne@test.host.com>
+Date: Fri, 30 Apr 2021 20:10:58 -0400
+Subject: [PATCH 2/4] Fix Bug #1955633 - Recovery of Keys migrated to latest
+ version of KRA fail to recover and result in Null Point Exception
+ [rhel-7.9.z]
+
+This is a very simple fix to prevent the reported null pointer exception.
+Checking in directly using the trivial checkin policy.
+
+(cherry picked from commit c792a8545aecdb4ec17b1a18a401fcff288f877e)
+---
+ base/server/cmscore/src/com/netscape/cmscore/dbs/KeyRecord.java | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/base/server/cmscore/src/com/netscape/cmscore/dbs/KeyRecord.java b/base/server/cmscore/src/com/netscape/cmscore/dbs/KeyRecord.java
+index 556c4a7..fd8fff9 100644
+--- a/base/server/cmscore/src/com/netscape/cmscore/dbs/KeyRecord.java
++++ b/base/server/cmscore/src/com/netscape/cmscore/dbs/KeyRecord.java
+@@ -506,6 +506,10 @@ public class KeyRecord implements IDBObj, IKeyRecord {
+     }
+ 
+     public Boolean isEncrypted() throws EBaseException {
++        if(mMetaInfo == null) {
++            return null;
++        }
++
+         String encrypted = (String) mMetaInfo.get(KeyRecordParser.OUT_PL_ENCRYPTED);
+         if (encrypted == null)
+             return null;
+-- 
+1.8.3.1
+
+
+From 201cef17ad2a6fcc84277b9a62c7e986212c0622 Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Thu, 6 May 2021 17:17:37 -0700
+Subject: [PATCH 3/4] Fix: Bug 1942687 - TPS not populating Token Policy, or
+ switching PIN_RESET=YES to NO . (#3510)
+
+Now the behavior will be the following:
+
+    When a new token entry gets created in the token db, due to a token operation such
+    as format or enrollment, the db entry will get populated with the contents of the
+    CS.cfg value:
+    ex:
+    tokendb.defaultPolicy=RE_ENROLL=YES;RENEW=NO;FORCE_FORMAT=NO;PIN_RESET=NO;RESET_PIN_RESET_TO_NO=NO
+
+    Now the value of RESET_PIN_RESET_TO_NO is actually observed.
+    If this value is set to YES and pin reset is allowed, after a successful pin reset,
+    the value of PIN_RESET will be set to NO, thus not allowing further pin resets on this
+    token, until the value is manually changed in the token db entry.
+
+    Also, the class itself has been simplified to allow the cuid token number at constructor
+    time. Now if another token is desired , we must instantiate a new TPSTokenPolicy object for
+    that additional token.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit 5f25323a9098af496196dbff0e7f0e89ee7621de)
+---
+ .../org/dogtagpki/server/tps/TPSTokenPolicy.java   | 133 ++++++++++++++++++---
+ .../src/org/dogtagpki/server/tps/TPSTokendb.java   |   4 +
+ .../server/tps/processor/TPSEnrollProcessor.java   |  23 ++--
+ .../server/tps/processor/TPSPinResetProcessor.java |  14 ++-
+ .../server/tps/processor/TPSProcessor.java         |  21 ++++
+ 5 files changed, 165 insertions(+), 30 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokenPolicy.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokenPolicy.java
+index 4d7af48..685319e 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokenPolicy.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokenPolicy.java
+@@ -40,18 +40,31 @@ public class TPSTokenPolicy {
+     private boolean force_format = false;
+     private boolean pin_reset = true;
+     private boolean reset_pin_reset_to_no = false;
++    private String cuid = null;
+ 
+-    public TPSTokenPolicy (TPSSubsystem tps) throws TPSException {
++    //Construct with a single token in mind. Load the token's config from
++    //the db after the default. All operations will then be on this token.
++    //
++    public TPSTokenPolicy (TPSSubsystem tps,String cuid) throws TPSException {
+         if (tps == null) {
+             String msg = "TPSTokenPolicy.TPSTokenPolicy: tps cannnot be null";
+             CMS.debug(msg);
+             throw new TPSException(msg);
+         }
++        if (cuid == null) {
++            String msg = "TPSTokenPolicy.TPSTokenPolicy: cuid cannnot be null";
++            CMS.debug(msg);
++            throw new TPSException(msg);
++        }
++
+         this.tps = tps;
+-        // init from config first
++        // Get the CS.cfg defaults first
+         String policySetString = getDefaultPolicySetString();
+         parsePolicySetString(policySetString);
+ 
++        this.cuid = cuid;
++        //Read from the token db once and write at the end if needed
++        getUpdatedPolicy();
+     }
+ 
+     public String getDefaultPolicySetString() {
+@@ -92,6 +105,41 @@ public class TPSTokenPolicy {
+         }
+     }
+ 
++    /* Take the current state of the policyt variables, create a new policy string,
++     * and write the new value for the provided token cuid.
++     */
++    public void updatePolicySet()  throws TPSException {
++   
++        String method = "TPSTokenPolicy.updatePolicySet: "; 
++        String msg = method +  "Can't update token policy string to database.";
++
++        TokenRecord tokenRecord = null;
++        String policySetString = null;
++        try {
++            tokenRecord = tps.tdb.tdbGetTokenEntry(this.cuid);
++        } catch (Exception e) {
++            throw new TPSException(e.toString() + " " + msg);
++        }
++
++        String newPolicy = "";
++
++        newPolicy += "RE_ENROLL=" + getFromBool(re_enroll);
++        newPolicy += ";RENEW=" + getFromBool(renew);
++        newPolicy += ";FORCE_FORMAT=" + getFromBool(force_format);
++        newPolicy += ";PIN_RESET=" + getFromBool(pin_reset);
++        newPolicy += ";RESET_PIN_RESET_TO_NO=" + getFromBool(reset_pin_reset_to_no);
++        newPolicy += ";RENEW_KEEP_OLD_ENC_CERTS=" + getFromBool(renew_keep_old_enc_certs);  
++        
++        CMS.debug(method + "newPolicy: " + newPolicy); 
++        tokenRecord.setPolicy(newPolicy);
++        try {
++            tps.tdb.tdbUpdateTokenEntry(tokenRecord);
++        } catch(Exception e) {
++            throw new TPSException(e.toString() + " " + msg);
++        }
++
++    }
++
+ /*
+  * getBool translates string to boolean:
+  * true: "YES", "yes", "TRUE", "true"
+@@ -114,12 +162,19 @@ public class TPSTokenPolicy {
+         return defaultBool;
+     }
+ 
+-    private void getUpdatedPolicy(String cuid) {
++    private String getFromBool(boolean value) {
++        if(value == true) 
++            return "YES";
++
++        return "NO";
++    } 
++
++    private void getUpdatedPolicy() {
+         // note: default policy already initialized in the constructor
+         TokenRecord tokenRecord = null;
+         String policySetString = null;
+         try {
+-            tokenRecord = tps.tdb.tdbGetTokenEntry(cuid);
++            tokenRecord = tps.tdb.tdbGetTokenEntry(this.cuid);
+         } catch (Exception e) {
+             // just take the default;
+             return;
+@@ -129,38 +184,82 @@ public class TPSTokenPolicy {
+         parsePolicySetString(policySetString);
+     }
+ 
+-    public boolean isAllowedTokenPinReset(String cuid) {
+-        getUpdatedPolicy(cuid);
++    // Note we only want to allow one cuid to be operated upon
++    // by this class, since we are going to allow values to be changed
++    // as well as written.
++    
++    public boolean isAllowedTokenPinReset() {
++
++        return reset_pin_reset_to_no;
++    }
++
++    // Add better named version to get the value
++    // reset_pin_reset_to_no
++   
++    public boolean isAllowedResetPinResetToNo() {
+ 
+         return reset_pin_reset_to_no;
++
+     }
+ 
+-    public boolean isAllowedPinReset(String cuid) {
+-        getUpdatedPolicy(cuid);
++    public boolean isAllowedPinReset() {
+ 
+         return pin_reset;
+     }
+ 
+-    public boolean isForceTokenFormat(String cuid) {
+-        getUpdatedPolicy(cuid);
++    public boolean isForceTokenFormat() {
+ 
+         return force_format;
+     }
+ 
+-    public boolean isAllowdTokenReenroll(String cuid) {
+-        getUpdatedPolicy(cuid);
++    public boolean isAllowdTokenReenroll() {
+ 
+         return re_enroll;
+     }
+ 
+-    public boolean isAllowdRenewSaveOldEncCerts(String cuid) {
+-        getUpdatedPolicy(cuid);
++    public boolean isAllowdRenewSaveOldEncCerts() {
++
+         return renew_keep_old_enc_certs;
+     }
+ 
+-    public boolean isAllowdTokenRenew(String cuid) {
+-        getUpdatedPolicy(cuid);
++    public boolean isAllowdTokenRenew() {
+ 
+         return renew;
+     }
+-}
+\ No newline at end of file
++
++    public void setAllowedTokenPinReset(boolean value) {
++
++        reset_pin_reset_to_no = value;
++    }
++
++    public void setAllowedResetPinResetToNo(boolean value) {
++
++        reset_pin_reset_to_no = value;
++    }
++
++    public void setAllowedPinReset(boolean value) {
++
++        pin_reset = value;
++    }
++
++    public void setForceTokenFormat(boolean value) {
++
++        force_format = value;
++    }
++
++    public void setAllowdTokenReenroll(boolean value) {
++
++        re_enroll = value;
++    }
++
++    public void setAllowdRenewSaveOldEncCerts(boolean value) {
++
++        renew_keep_old_enc_certs = value;
++    }
++
++    public void setAllowdTokenRenew(boolean value) {
++
++        renew = value;
++    }
++
++}
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+index 7434502..b58c24f 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+@@ -200,9 +200,13 @@ public class TPSTokendb {
+ 
+     public void tdbAddTokenEntry(TokenRecord tokenRecord, TokenStatus status)
+             throws Exception {
++
++        String method = "TPSTokendb.tdbAddTokenEntry: ";
+         tokenRecord.setTokenStatus(status);
+ 
+         tps.tokenDatabase.addRecord(tokenRecord.getId(), tokenRecord);
++
++        CMS.debug(method + "Added tokenRecord.");
+     }
+ 
+     public void tdbUpdateTokenEntry(TokenRecord tokenRecord)
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java
+index 5175344..2d8c89f 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java
+@@ -95,7 +95,7 @@ public class TPSEnrollProcessor extends TPSProcessor {
+         String logMsg = null;
+         String auditInfo = null;
+         TPSSubsystem tps = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+-        TPSTokenPolicy tokenPolicy = new TPSTokenPolicy(tps);
++        TPSTokenPolicy tokenPolicy = null; 
+         IConfigStore configStore = CMS.getConfigStore();
+         String configName;
+ 
+@@ -128,12 +128,13 @@ public class TPSEnrollProcessor extends TPSProcessor {
+         tokenRecord = isTokenRecordPresent(appletInfo);
+ 
+         if (tokenRecord != null) {
+-            CMS.debug(method + " found token...");
++            CMS.debug(method + " found token... policy: " + tokenRecord.getPolicy());
+             isTokenPresent = true;
+         } else {
+             CMS.debug(method + " token does not exist in tokendb... create one in memory");
+             tokenRecord = new TokenRecord();
+             tokenRecord.setId(appletInfo.getCUIDhexStringPlain());
++            fillTokenRecordDefaultPolicy(tokenRecord);
+         }
+ 
+         fillTokenRecord(tokenRecord, appletInfo);
+@@ -332,13 +333,14 @@ public class TPSEnrollProcessor extends TPSProcessor {
+                         " to " + newState);
+             }
+ 
+-            do_force_format = tokenPolicy.isForceTokenFormat(cuid);
++            tokenPolicy = new TPSTokenPolicy(tps,cuid);
++            do_force_format = tokenPolicy.isForceTokenFormat();
+             if (do_force_format)
+                 CMS.debug(method + " Will force format first due to policy.");
+ 
+             if (!isExternalReg &&
+-                    !tokenPolicy.isAllowdTokenReenroll(cuid) &&
+-                    !tokenPolicy.isAllowdTokenRenew(cuid)) {
++                    !tokenPolicy.isAllowdTokenReenroll() &&
++                    !tokenPolicy.isAllowdTokenRenew()) {
+                 CMS.debug(method + " token renewal or reEnroll disallowed ");
+                 logMsg = "Operation renewal or reEnroll for CUID " + cuid +
+                         " Disabled";
+@@ -524,7 +526,7 @@ public class TPSEnrollProcessor extends TPSProcessor {
+         // at this point, enrollment, renewal, or recovery have been processed accordingly;
+         if (!isExternalReg &&
+                 status == TPSStatus.STATUS_RENEWAL_IS_PROCESSED &&
+-                tokenPolicy.isAllowdTokenRenew(cuid)) {
++                tokenPolicy.isAllowdTokenRenew()) {
+             renewed = true;
+             CMS.debug(method + " renewal happened.. ");
+         }
+@@ -1110,7 +1112,7 @@ public class TPSEnrollProcessor extends TPSProcessor {
+         IConfigStore configStore = CMS.getConfigStore();
+         String configName;
+         TPSSubsystem tps = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+-        TPSTokenPolicy tokenPolicy = new TPSTokenPolicy(tps);
++        TPSTokenPolicy tokenPolicy = null;
+ 
+         ArrayList<TokenRecord> tokenRecords = null;
+         try {
+@@ -1157,7 +1159,8 @@ public class TPSEnrollProcessor extends TPSProcessor {
+ 
+                 } else if (tokenRecord.getTokenStatus() == TokenStatus.ACTIVE) {
+                     // current token is already active; renew if allowed
+-                    if (tokenPolicy.isAllowdTokenRenew(aInfo.getCUIDhexStringPlain())) {
++                    tokenPolicy = new TPSTokenPolicy(tps,aInfo.getCUIDhexStringPlain());
++                    if (tokenPolicy.isAllowdTokenRenew()) {
+                         return processRenewal(certsInfo, channel, aInfo, tokenRecord);
+                     } else {
+                         logMsg = "token is already active; can't renew because renewal is not allowed; will re-enroll if allowed";
+@@ -1658,9 +1661,9 @@ public class TPSEnrollProcessor extends TPSProcessor {
+ 
+         //See if policy calls for this feature
+ 
+-        TPSTokenPolicy tokenPolicy = new TPSTokenPolicy(tps);
++        TPSTokenPolicy tokenPolicy = new TPSTokenPolicy(tps,tokenRecord.getId());
+ 
+-        boolean recoverOldEncCerts = tokenPolicy.isAllowdRenewSaveOldEncCerts(tokenRecord.getId());
++        boolean recoverOldEncCerts = tokenPolicy.isAllowdRenewSaveOldEncCerts();
+         CMS.debug(method + " Recover Old Encryption Certs for Renewed Certs: " + recoverOldEncCerts);
+         if (oldEncCertsToRecover.size() > 0 && recoverOldEncCerts == true) {
+             CMS.debug("About to attempt to recover old encryption certs just renewed.");
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+index 805af20..2ee9186 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+@@ -121,14 +121,14 @@ public class TPSPinResetProcessor extends TPSProcessor {
+                     TPSStatus.STATUS_ERROR_UNKNOWN_TOKEN);
+         }
+ 
+-        TPSTokenPolicy tokenPolicy = new TPSTokenPolicy(tps);
+-
+         fillTokenRecord(tokenRecord, appletInfo);
+         session.setTokenRecord(tokenRecord);
+ 
+         String cuid = appletInfo.getCUIDhexStringPlain();
+         String tokenType = null;
+ 
++        TPSTokenPolicy tokenPolicy = new TPSTokenPolicy(tps,cuid);
++
+         if(isExternalReg) {
+             CMS.debug(method + " isExternalReg: ON");
+ 
+@@ -309,7 +309,7 @@ public class TPSPinResetProcessor extends TPSProcessor {
+ 
+         }
+ 
+-        boolean pinResetAllowed = tokenPolicy.isAllowedPinReset(tokenRecord.getId());
++        boolean pinResetAllowed = tokenPolicy.isAllowedPinReset();
+ 
+         CMS.debug(method + ": PinResetPolicy: Pin Reset Allowed:  " + pinResetAllowed);
+         logMsg = method + " PinReset Policy forbids pin reset operation.";
+@@ -362,6 +362,14 @@ public class TPSPinResetProcessor extends TPSProcessor {
+             throw new TPSException(logMsg, TPSStatus.STATUS_ERROR_UPDATE_TOKENDB_FAILED);
+         }
+ 
++        //If policy tells us to disallow pin reset after
++        //a successfull pin reset, do so.
++        //
++        if(tokenPolicy.isAllowedResetPinResetToNo()) {
++            tokenPolicy.setAllowedPinReset(false); 
++            tokenPolicy.updatePolicySet();
++            CMS.debug(method + ": Updating pin reset policy to NO.");
++        }
+         CMS.debug(method + ": Token Pin successfully reset!");
+ 
+     }
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
+index baf0671..cadab1d 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
+@@ -1531,6 +1531,26 @@ public class TPSProcessor {
+ 
+     }
+ 
++    protected void fillTokenRecordDefaultPolicy(TokenRecord tokenRecord) throws TPSException {
++
++        String method = "TPSProcessor.fillTokenRecordDefaultPolicy: ";
++ 
++        try {
++            IConfigStore configStore = CMS.getConfigStore();
++
++            String config = "tokendb.defaultPolicy";
++            String defaultPolicy = configStore.getString(config);
++
++            CMS.debug(method + " default token policy: " + defaultPolicy);
++
++            tokenRecord.setPolicy(defaultPolicy);
++        } catch (Exception e) {
++            CMS.debug(method + "Problem with  adding the default policy to the token.");
++            throw new TPSException(e.toString(),TPSStatus.STATUS_ERROR_MISCONFIGURATION);
++        }
++
++    }
++
+     protected TokenRecord isTokenRecordPresent(AppletInfo appletInfo) throws TPSException {
+ 
+         if (appletInfo == null) {
+@@ -2353,6 +2373,7 @@ public class TPSProcessor {
+             try {
+                 tps.tdb.tdbAddTokenEntry(tokenRecord, TokenStatus.UNFORMATTED);
+                 tps.tdb.tdbActivity(ActivityDatabase.OP_ADD, tokenRecord, session.getIpAddress(), logMsg, "success");
++                fillTokenRecordDefaultPolicy(tokenRecord);
+                 CMS.debug("TPSProcessor.format: token added");
+             } catch (Exception e) {
+                 logMsg = logMsg + ":" + e.toString();
+-- 
+1.8.3.1
+
+From e83bcc4f045bd6ad43798ff38306ab3c4bc4a52d Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Fri, 7 May 2021 14:05:18 +0100
+Subject: [PATCH 4/4] Prevent debug exception when product version not found
+
+Resolves: #1914587
+(cherry picked from commit d86eefb661766342a4473c699dc6687986420161)
+---
+ base/common/src/com/netscape/certsrv/apps/CMS.java | 18 ++++++++
+ .../netscape/cms/servlet/csadmin/GetStatus.java    | 51 +++-------------------
+ 2 files changed, 23 insertions(+), 46 deletions(-)
+
+diff --git a/base/common/src/com/netscape/certsrv/apps/CMS.java b/base/common/src/com/netscape/certsrv/apps/CMS.java
+index 1dace42..e852043 100644
+--- a/base/common/src/com/netscape/certsrv/apps/CMS.java
++++ b/base/common/src/com/netscape/certsrv/apps/CMS.java
+@@ -17,7 +17,9 @@
+ // --- END COPYRIGHT BLOCK ---
+ package com.netscape.certsrv.apps;
+ 
++import java.io.File;
+ import java.math.BigInteger;
++import java.nio.file.Files;
+ import java.security.NoSuchAlgorithmException;
+ import java.security.cert.Certificate;
+ import java.security.cert.CertificateEncodingException;
+@@ -135,6 +137,7 @@ public final class CMS {
+     public static final String SUBSYSTEM_SELFTESTS = ISelfTestSubsystem.ID;
+     public static final int PRE_OP_MODE = 0;
+     public static final int RUNNING_MODE = 1;
++    private static final String PRODUCT_NAME_FILE = "/usr/share/pki/CS_SERVER_VERSION";
+ 
+     /**
+      * Private constructor.
+@@ -1519,6 +1522,21 @@ public final class CMS {
+         _engine.sleepOneMinute();
+     }
+ 
++    /**
++     * Return the product name from /usr/share/pki/CS_SERVER_VERSION
++     * which is provided by the server theme package.
++     */
++    public static String getProductName() throws Exception {
++
++        File file = new File(PRODUCT_NAME_FILE);
++
++        if (!file.exists()) {
++            return null;
++        }
++
++        return new String(Files.readAllBytes(file.toPath())).trim();
++    }
++
+     public static boolean isExcludedLdapAttrsEnabled() {
+         return _engine.isExcludedLdapAttrsEnabled();
+     }
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/csadmin/GetStatus.java b/base/server/cms/src/com/netscape/cms/servlet/csadmin/GetStatus.java
+index 1cb8a4c..8f6d340 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/csadmin/GetStatus.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/csadmin/GetStatus.java
+@@ -18,7 +18,6 @@
+ package com.netscape.cms.servlet.csadmin;
+ 
+ import java.io.IOException;
+-import java.io.FileInputStream;
+ import java.util.Locale;
+ 
+ import javax.servlet.ServletConfig;
+@@ -26,6 +25,7 @@ import javax.servlet.ServletException;
+ import javax.servlet.http.HttpServletRequest;
+ import javax.servlet.http.HttpServletResponse;
+ 
++import org.apache.commons.lang.StringUtils;
+ import org.w3c.dom.Node;
+ 
+ import com.netscape.certsrv.apps.CMS;
+@@ -35,8 +35,6 @@ import com.netscape.cms.servlet.base.CMSServlet;
+ import com.netscape.cms.servlet.base.UserInfo;
+ import com.netscape.cms.servlet.common.CMSRequest;
+ import com.netscape.cmsutil.xml.XMLObject;
+-import org.apache.commons.io.IOUtils;
+-import org.apache.commons.lang.StringUtils;
+ 
+ public class GetStatus extends CMSServlet {
+ 
+@@ -44,8 +42,6 @@ public class GetStatus extends CMSServlet {
+      *
+      */
+     private static final long serialVersionUID = -2852842030221659847L;
+-    // File below will be a member of a pki theme package.
+-    private static final String productVersionFILE = "/usr/share/pki/CS_SERVER_VERSION";
+ 
+     public GetStatus() {
+         super();
+@@ -85,13 +81,13 @@ public class GetStatus extends CMSServlet {
+             xmlObj.addItemToContainer(root, "Type", type);
+             xmlObj.addItemToContainer(root, "Status", status);
+             xmlObj.addItemToContainer(root, "Version", version);
++
+             // File below will be a member of a pki theme package.
+-            String productVersion = getProductVersion(productVersionFILE);
++            String productName = CMS.getProductName();
+ 
+-            if(!StringUtils.isEmpty(productVersion)) {
+-                xmlObj.addItemToContainer(root,"ProductVersion", productVersion);
++            if (!StringUtils.isEmpty(productName)) {
++                xmlObj.addItemToContainer(root, "ProductVersion", productName);
+             }
+-
+             byte[] cb = xmlObj.toByteArray();
+ 
+             outputResult(httpResp, "application/xml", cb);
+@@ -119,41 +115,4 @@ public class GetStatus extends CMSServlet {
+         }
+         return locale;
+     }
+-
+-    /**
+-     * Return the product version if the file: /usr/share/pki/CS_SERVER_VERSION
+-     * exists.
+-     *
+-     * Caller only cares if there is a string or not, exceptions handled here.
+-     */
+-    private String getProductVersion(String versionFilePathName) {
+-        String version = null;
+-        FileInputStream inputStream = null;
+-
+-        if(StringUtils.isEmpty(versionFilePathName)) {
+-            CMS.debug("Missing product version file path!");
+-            return null;
+-        }
+-
+-        try {
+-            inputStream = new FileInputStream(versionFilePathName);
+-            String contents = IOUtils.toString(inputStream);
+-
+-            if(contents != null) {
+-                CMS.debug("Returning product version: " + version);
+-                version = contents.trim();
+-            }
+-        } catch (Exception e) {
+-            CMS.debug("Failed to read product version String. " + e);
+-        }
+-        finally {
+-            if(inputStream != null) {
+-                try {
+-                    inputStream.close();
+-                } catch (IOException e) {
+-                }
+-            }
+-        }
+-        return version;
+-    }
+ }
+-- 
+1.8.3.1
+

@@ -1,0 +1,68 @@
+From 749c8966aff781c0a8e5b114df64aeb76e1e9bdb Mon Sep 17 00:00:00 2001
+From: Fraser Tweedale <ftweedal@redhat.com>
+Date: Thu, 30 May 2019 19:44:00 +1000
+Subject: [PATCH] PKIExceptionMapper: coerce media type to XML or JSON
+
+Some resources do not return (upon success) application/json or
+application/xml.  For example, some resources in AuthorityService
+can return application/pkix-cert, application/x-pem-file or
+application/pkcs7-mime.  But if a PKIException exception (e.g.
+ResourceNotFoundException) occurs in such a method, RESTEasy can't
+turn the PKIException.Data entity into the declared media type, and
+it throws a NoMessageBodyWriterFoundFailure, causing a 500 Internal
+Server Error response.
+
+Update PKIExceptionMapper to always coerce the response Content-Type
+to either application/xml or application/json.  If the Accept header
+preferences one of these, the preferred media type is used.
+Otherwise we default to application/xml.
+
+Fixes: https://pagure.io/dogtagpki/issue/3102
+(cherry picked from commit bef30cde3a452a459c5d29010861314dd8b86642)
+---
+ .../org/dogtagpki/server/rest/PKIExceptionMapper.java | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/base/server/cms/src/org/dogtagpki/server/rest/PKIExceptionMapper.java b/base/server/cms/src/org/dogtagpki/server/rest/PKIExceptionMapper.java
+index 072ac05..0cfab44 100644
+--- a/base/server/cms/src/org/dogtagpki/server/rest/PKIExceptionMapper.java
++++ b/base/server/cms/src/org/dogtagpki/server/rest/PKIExceptionMapper.java
+@@ -2,6 +2,7 @@ package org.dogtagpki.server.rest;
+ 
+ import javax.ws.rs.core.Context;
+ import javax.ws.rs.core.HttpHeaders;
++import javax.ws.rs.core.MediaType;
+ import javax.ws.rs.core.Response;
+ import javax.ws.rs.ext.ExceptionMapper;
+ import javax.ws.rs.ext.Provider;
+@@ -17,10 +18,26 @@ public class PKIExceptionMapper implements ExceptionMapper<PKIException> {
+ 
+     public Response toResponse(PKIException exception) {
+         // convert PKIException into HTTP response
++
++        // The exception Data can only be serialised as XML or JSON,
++        // so coerce the response content type to one of these.
++        // Default to XML, but consider the Accept header.
++        MediaType contentType = MediaType.APPLICATION_XML_TYPE;
++        for (MediaType acceptType : headers.getAcceptableMediaTypes()) {
++            if (acceptType.isCompatible(MediaType.APPLICATION_XML_TYPE)) {
++                contentType = MediaType.APPLICATION_XML_TYPE;
++                break;
++            }
++            if (acceptType.isCompatible(MediaType.APPLICATION_JSON_TYPE)) {
++                contentType = MediaType.APPLICATION_JSON_TYPE;
++                break;
++            }
++        }
++
+         return Response
+                 .status(exception.getCode())
+                 .entity(exception.getData())
+-                .type(PKIService.getResponseFormat(headers))
++                .type(contentType)
+                 .build();
+     }
+ }
+-- 
+1.8.3.1
+

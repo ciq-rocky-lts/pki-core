@@ -1,0 +1,48 @@
+From 428c189fa0560bf656b8ded272295d705f602093 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Thu, 19 Jan 2023 10:10:33 +0000
+Subject: [PATCH] Add authorization to limit setTokenStatus to allowed admins
+
+This patch adds authorization to limit setTokenStatus to admins
+allowed for the token type in question.
+If a token is not associated with a keyType/profile, then the admin
+must have the ALL_PROFILES prvilege.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2106153
+
+(cherry picked from commit d74ac7e6e8a2efbb7abe3b5c21637afdd084d245)
+---
+ .../src/org/dogtagpki/server/tps/rest/TokenService.java | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+index d2a3444..5256a66 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+@@ -75,6 +75,23 @@ public class TokenService extends SubsystemService implements TokenResource {
+     public void setTokenStatus(TokenRecord tokenRecord, TokenStatus tokenState, String ipAddress, String remoteUser,
+             Map<String, String> auditModParams)
+                     throws Exception {
++        String method = "TPSService:setTokenStatus: ";
++        String msg = "";
++
++        List<String> authorizedProfiles = getAuthorizedProfiles();
++        if (authorizedProfiles == null) {
++            msg = "authorizedProfiles null";
++            CMS.debug(method + msg);
++            throw new PKIException(method + msg);
++        }
++        String type = tokenRecord.getType();
++        // if token not associated with any keyType/profile, disallow access,
++        // unless the user has the "ALL_PROFILES" privilege
++        if (!authorizedProfiles.contains(UserResource.ALL_PROFILES)) {
++            if (((type == null) || type.isEmpty()) || !authorizedProfiles.contains(type))
++               throw new PKIException(method + "Token record restricted");
++        }
++
+         TPSSubsystem tps = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+         IConfigStore config = CMS.getConfigStore();
+ 
+-- 
+1.8.3.1
+

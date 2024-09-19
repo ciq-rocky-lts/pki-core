@@ -1,0 +1,55 @@
+From 6d535b39fca585b9db2e314f75dc1bcb41ba2480 Mon Sep 17 00:00:00 2001
+From: Alexander Scheel <ascheel@redhat.com>
+Date: Mon, 22 Feb 2021 12:09:02 -0500
+Subject: [PATCH] Fix regression in TPS System menu
+
+When backporting 1dbb07f8e41b4809b0f41a7643c37301fcf712d8 from PKI
+10.9+, there was a hidden dependency on
+c8f4fbc561b89603bc651395d3f995d6d4cac9b4, where the TPS variable was
+renamed from lowercase tps. In pulling the patch, this variable was
+renamed to uppercase TPS, breaking usages of lowercase tps in index.js.
+
+Best to use lowercase and avoid pulling in c8f4fbc -- which in turn
+depends on other commits (such as
+f85f8e9d2fc16436757b26b7d10130435c36455b).
+
+Signed-off-by: Alexander Scheel <ascheel@redhat.com>
+(cherry picked from commit abc9e127a4704382d6069e7be8726e2c4436e821)
+---
+ base/tps/shared/webapps/tps/js/tps.js | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/base/tps/shared/webapps/tps/js/tps.js b/base/tps/shared/webapps/tps/js/tps.js
+index f12f7b4..61007fd 100644
+--- a/base/tps/shared/webapps/tps/js/tps.js
++++ b/base/tps/shared/webapps/tps/js/tps.js
+@@ -19,7 +19,7 @@
+  * @author Endi S. Dewata
+  */
+ 
+-var TPS = {
++var tps = {
+     PROFILE_ID_PATTERN: /^[a-zA-Z0-9_]+$/,
+     PROPERTY_NAME_PATTERN: /^[a-zA-Z0-9_\.]+$/,
+     getElementName: function (component) {
+@@ -133,7 +133,7 @@ var PropertiesTable = Table.extend({
+     addEntry: function(entry) {
+         var self = this;
+ 
+-        if (!entry.name.match(TPS.PROPERTY_NAME_PATTERN)) {
++        if (!entry.name.match(tps.PROPERTY_NAME_PATTERN)) {
+             throw "Invalid property name: " + entry.name;
+         }
+ 
+@@ -432,7 +432,7 @@ var ConfigEntryPage = EntryPage.extend({
+     save: function() {
+         var self = this;
+ 
+-        if (!self.entry.profileID.match(TPS.PROFILE_ID_PATTERN)) {
++        if (!self.entry.profileID.match(tps.PROFILE_ID_PATTERN)) {
+             throw "Invalid profile ID: " + self.entry.profileID;
+         }
+ 
+-- 
+1.8.3.1
+

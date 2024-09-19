@@ -1,0 +1,30 @@
+From daf32eda6c44690391e56a92802379ae677f01fa Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Thu, 7 May 2020 13:20:02 -0400
+Subject: [PATCH] Fix to allow the SHA512withRSA/PSS algorithm to operate
+ properly. (#404)
+
+Previously signature using this alg has had the params malformed within.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit 5a3169fa6620cdebbc33c0df14e3759db4cee9ea)
+---
+ base/util/src/netscape/security/x509/AlgorithmId.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/base/util/src/netscape/security/x509/AlgorithmId.java b/base/util/src/netscape/security/x509/AlgorithmId.java
+index a5e4906..54446b5 100644
+--- a/base/util/src/netscape/security/x509/AlgorithmId.java
++++ b/base/util/src/netscape/security/x509/AlgorithmId.java
+@@ -763,7 +763,7 @@ public class AlgorithmId implements Serializable, DerEncoder {
+         } else if ("SHA384withRSA/PSS".equals(algName)) {
+             pssSpec = new PSSParameterSpec("SHA-384", "MGF1", MGF1ParameterSpec.SHA384, 48, 1);
+ 
+-        } else if ("SHA384withRSA/PSS".equals(algName)) {
++        } else if ("SHA512withRSA/PSS".equals(algName)) {
+             pssSpec = new PSSParameterSpec("SHA-512", "MGF1", MGF1ParameterSpec.SHA512, 64, 1);
+         }
+         try {
+-- 
+1.8.3.1
+

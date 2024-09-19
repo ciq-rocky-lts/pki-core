@@ -1,0 +1,89 @@
+From 066c16616a8c384da4e2a424744aea93e4b4a2d7 Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Thu, 23 May 2024 11:43:15 -0700
+Subject: [PATCH] Fix: Bug 2233158 - Make key wrapping algorithm configurable
+ between AES-KWP and AES-CBC [RHCS 9.7.z]. (#4753)
+
+The aes key wrapping alg was not being passed along correctly in TokenKeyRecoveryServlet class.
+
+Also slightly modify the code that determines the default card manager aid to allow tpsclient, our scp01 virtual tester, to continue to function. The tpsclient only returns 9000 for success instead of the aid in question.
+(cherry picked from commit a7f806fbf30aeb4f1c40469b37af1426da2fbf8c)
+---
+ .../cms/servlet/connector/TokenKeyRecoveryServlet.java   | 16 ++++++++++++++++
+ .../org/dogtagpki/server/tps/processor/TPSProcessor.java | 11 +++++++++--
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/connector/TokenKeyRecoveryServlet.java b/base/server/cms/src/com/netscape/cms/servlet/connector/TokenKeyRecoveryServlet.java
+index c7a257d..7abe516 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/connector/TokenKeyRecoveryServlet.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/connector/TokenKeyRecoveryServlet.java
+@@ -154,6 +154,7 @@ public class TokenKeyRecoveryServlet extends CMSServlet {
+         boolean missingParam = false;
+         boolean missingTransAes = false;
+         boolean missingTransDes = false;
++        boolean missingAesKeyWrapAlg = false;
+         String status = "0";
+ 
+         CMS.debug("processTokenKeyRecovery begins:");
+@@ -163,9 +164,18 @@ public class TokenKeyRecoveryServlet extends CMSServlet {
+         String rKeyid = req.getParameter(IRemoteRequest.KRA_RECOVERY_KEYID);
+         String rdesKeyString = req.getParameter(IRemoteRequest.KRA_Trans_DesKey);
+         String rCert = req.getParameter(IRemoteRequest.KRA_RECOVERY_CERT);
++        //RedHat : make sure the key wrap alg is being processed correctly
++        String aesKeyWrapAlg = req.getParameter(IRemoteRequest.KRA_Aes_Wrap_Alg);
+ 
+         String raesKeyString = req.getParameter(IRemoteRequest.KRA_Trans_AesKey);
+ 
++        //RedHat : make sure the key wrap alg is being processed correctly
++        if ((aesKeyWrapAlg == null) || (aesKeyWrapAlg.equals(""))) {
++            CMS.debug("TokenKeyRecoveryServlet: processTokenKeyRecovery(): missing request parameter: AES-KeyWrap-alg");
++            missingAesKeyWrapAlg = true;
++        }
++
++
+         if ((rCUID == null) || (rCUID.equals(""))) {
+             CMS.debug("TokenKeyRecoveryServlet: processTokenKeyRecovery(): missing request parameter: CUID");
+             missingParam = true;
+@@ -209,6 +219,12 @@ public class TokenKeyRecoveryServlet extends CMSServlet {
+                 thisreq.setExtData(IRequest.NETKEY_ATTR_DRMTRANS_AES_KEY, raesKeyString);
+             }
+ 
++            //RedHat : make sure the key wrap alg is being processed correctly
++            if(!missingAesKeyWrapAlg) {
++                CMS.debug("TokenKeyRecoveryServlet: processTokenKeyRecovery(): aesKeyWrapAlg: " + aesKeyWrapAlg);
++                thisreq.setExtData(IRequest.NETKEY_ATTR_SSKEYGEN_AES_KEY_WRAP_ALG,aesKeyWrapAlg);
++            }
++
+             if ((rCert != null) && (!rCert.equals(""))) {
+                 thisreq.setExtData(IRequest.NETKEY_ATTR_USER_CERT, rCert);
+                CMS.debug("TokenKeyRecoveryServlet: processTokenKeyRecovery(): received request parameter: cert");
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
+index 48a341d..984ce79 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
+@@ -3501,13 +3501,20 @@ public class TPSProcessor {
+                     TPSStatus.STATUS_ERROR_CANNOT_ESTABLISH_COMMUNICATION);
+             }
+         }
+-        
++
+         if (defaultAID != null && defaultAID.checkResult())
+         {
+             TPSBuffer aidData = parseAIDResponse(defaultAID.getData());
+ 
+             String defAIDStr = aidData.toHexStringPlain();
+-            
++
++            //RedHat : appease tpsclient tester that only returns 90 00 success, using original default AID.
++            if(aidData == null  || aidData.size() == 0)   {
++                CMS.debug(method + "tpsclient tester probably returned only 90 00, assume old default AID.");
++                defAIDStr = getCardManagerAIDList().get(0);
++                aidData = new TPSBuffer(defAIDStr);
++            }
++ 
+             // Get list of valid AID values from the configuration file
+             List<String>  aidBuf = getCardManagerAIDList();
+            
+-- 
+1.8.3.1
+

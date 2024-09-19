@@ -1,0 +1,51 @@
+From fe4788410c0b5e879bdcfe986f50350f2343e531 Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Mon, 3 Jun 2024 16:47:56 -0700
+Subject: [PATCH] Fix Bug 2265180 - Add Support for Symmetric Key Rollover
+ [RHCS 9.7.z]. (#4765)
+
+We found in QE a situation in fips mode with the hsm that the calculation of the scp03 keycheck value
+could fail. Simply making that method behave like the scp01 version of the method fixes the issue.
+
+Also added some trivial code to apease tpsclient. We do so by creating a new secret config value used only
+by those testing the product with tpsclient:
+
+channel.scp01.no.le.byte=true
+
+This will skip the le zero byte on only the generatekey and readobject apdu's only if scp01 is detected and this value is true.
+Otherwise everything will default to current behavior and the le byte of zero will be added as per current behavior.
+
+Fix case when rollover feature checks config in non external reg mode and caused NPE.
+Adding one file that didn't make it into the last commit.
+(cherry picked from commit acb198939fc215beb44921852425d08c9257db97)
+---
+ base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
+index 984ce79..2aa01a3 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSProcessor.java
+@@ -2570,7 +2570,8 @@ public class TPSProcessor {
+                 symKeyUpgradeStatus = TPSStatus.STATUS_ERROR_SYMKEY_256_UPGRADE;
+             }
+             // Check whether exception is caused by attempting to change 256 OMK to 128 FMK
+-            else if (getSelectedKeySet().equals(getKeyDowngradeKeySet()) && getSymmetricKeysRequiredVersion() == getKeyDowngradeVersion())
++            // RedHat : avoid null ptr. For non external reg case.
++            else if (getSelectedKeySet() != null && getSelectedKeySet().equals(getKeyDowngradeKeySet()) && getSymmetricKeysRequiredVersion() == getKeyDowngradeVersion())
+             {
+                 // proceed with downgrade if configured to do so
+                 CMS.debug("TPSProcessor.checkAndUpgradeSymKeys: try downgrade key size.");
+@@ -3660,7 +3661,8 @@ public class TPSProcessor {
+             
+             // ** G&D 256 Key Rollover Support **
+             // set the flag to indicate if card needs to roll over to 256 OMK
+-            boolean keyRollNeeded = (getSelectedKeySet().equals(getKeyRolloverKeySet()) && requiredVersion == getKeyRolloverVersion());
++            // RedHat : avoid null ptr. For non external reg case.
++            boolean keyRollNeeded = (getSelectedKeySet() != null && getSelectedKeySet().equals(getKeyRolloverKeySet()) && requiredVersion == getKeyRolloverVersion());
+             CMS.debug(" keyRollNeeded: " + keyRollNeeded);
+             // try to make a secure channel with the 'requiredVersion' keys
+             // If this fails, we know we will have to attempt an upgrade
+-- 
+1.8.3.1
+

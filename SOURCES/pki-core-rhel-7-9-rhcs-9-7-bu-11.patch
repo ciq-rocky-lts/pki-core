@@ -1,0 +1,518 @@
+From 05568960aea79e9e3fb0f243ae3adc68963bcc69 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 3 Nov 2021 18:21:53 -0700
+Subject: [PATCH 1/4] Bug-2008319-pkispawn EC subCA 2-step failure in FIPS mode
+
+This patch addressed issue reported on failure with EC subCA 2-step
+installation in FIPS mode.
+My investigation reveals that certutil -R would fail in create_request nssdb.py.
+I found two different commits having attempts to fix the same issue:
+
+    f1f32c3
+    8bf682a
+However, the the resulting code appears to NOT contain the working copy.
+
+I pulled out code in this area in 10.2 as a reference (carefully referenced)
+to address the issue. It appears to fix the problem. I was able to create
+subCA successfully in the FIPS environment on both soft token and hsm.
+
+Note: The pkispawn parameter "pki_req_ski=DEFAULT" introduced in the two
+contradicting commits mentioned above doesn't seem to work with the
+source right out of the tip of DOGTAG_10_5_BRANCH;  I tried to touch as
+little as possible and not alter the logic involving pki_req_ski, and
+the result remains the same error as before this patch.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2008319
+
+(cherry picked from commit 01b4205efd97c592913f4866885b476f8593dbad)
+---
+ base/common/python/pki/nssdb.py | 97 ++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 87 insertions(+), 10 deletions(-)
+
+diff --git a/base/common/python/pki/nssdb.py b/base/common/python/pki/nssdb.py
+index 11509f0..4b427f5 100644
+--- a/base/common/python/pki/nssdb.py
++++ b/base/common/python/pki/nssdb.py
+@@ -424,7 +424,16 @@ class NSSDatabase(object):
+         logger.debug('Command: %s', ' '.join(cmd))
+         subprocess.check_call(cmd)
+ 
+-    def create_noise(self, noise_file, size=2048):
++    def create_noise(self, noise_file, size=2048, key_type='rsa'):
++        # Under EC keys, key_size parameter is actually the name of a curve.
++        # This curve maps to a specific size, but EC keys require less entropy
++        # to generate than RSA keys. We can either maintain a mapping of
++        # curve name -> key size (and note that the openssl rand command takes
++        # the number of bytes, not the number of bits), or we can hard-code
++        # some safe value. We choose the latter.
++        if key_type.lower() in ('ec', 'ecc'):
++            size = 1024
++
+         cmd = [
+             'openssl',
+             'rand',
+@@ -479,17 +488,20 @@ class NSSDatabase(object):
+                 Raw extension data (``bytes``)
+ 
+         """
+-        if not cka_id:
+-            cka_id = self.generate_key(
+-                key_type=key_type, key_size=key_size,
+-                curve=curve, noise_file=noise_file)
+-        if not isinstance(cka_id, six.text_type):
+-            raise TypeError('cka_id must be a text string')
++
++        logger.debug("nssdb.py:create_request starts")
+ 
+         tmpdir = tempfile.mkdtemp()
+ 
+         try:
+             if subject_key_id is not None:
++                if not cka_id:
++                    cka_id = self.generate_key(
++                        key_type=key_type, key_size=key_size,
++                        curve=curve, noise_file=noise_file)
++                if not isinstance(cka_id, six.text_type):
++                    raise TypeError('cka_id must be a text string')
++
+                 if subject_key_id == 'DEFAULT':
+                     # Caller wants a default subject key ID included
+                     # in CSR.  To do this we must first generate a
+@@ -536,11 +548,25 @@ class NSSDatabase(object):
+             if token:
+                 cmd.extend(['-h', token])
+ 
++            if cka_id is not None:
++                key_args = ['-k', cka_id]
++            else:
++                key_args = self.__generate_key_args(
++                    key_type=key_type, key_size=key_size, curve=curve)
++                if noise_file is None:
++                    noise_file = os.path.join(tmpdir, 'noise')
++                    size = key_size if key_size else 2048
++                    self.create_noise(noise_file=noise_file, size=size, key_type=key_type)
++                key_args.extend(['-z', noise_file])
++
++            cmd.extend(key_args)
++
++            if self.password_file:
++                cmd.extend(['-f', self.password_file])
++
+             cmd.extend([
+-                '-f', self.password_file,
+                 '-s', subject_dn,
+                 '-o', binary_request_file,
+-                '-k', cka_id,
+             ])
+ 
+             if hash_alg:
+@@ -690,7 +716,7 @@ class NSSDatabase(object):
+             fd, noise_file = tempfile.mkstemp()
+             os.close(fd)
+             size = key_size if key_size else 2048
+-            self.create_noise(noise_file=noise_file, size=size)
++            self.create_noise(noise_file=noise_file, size=size, key_type=key_type)
+         cmd.extend(['-z', noise_file])
+ 
+         try:
+@@ -1334,3 +1360,54 @@ class NSSDatabase(object):
+ 
+         finally:
+             shutil.rmtree(tmpdir)
++
++
++    @staticmethod
++    def __generate_key_args(key_type=None, key_size=None, curve=None):
++        """
++        Construct certutil keygen command args.
++
++        """
++        args = []
++        is_ec = key_type and key_type.lower() in ('ec', 'ecc')
++
++        if key_type:
++            # The -k parameter is either a key type or an identifer of a key
++            # to reuse. Make sure to handle ec correctly: the type should be
++            # "ec" not "ecc".
++            if is_ec:
++                args.extend(['-k', 'ec'])
++            else:
++                args.extend(['-k', key_type])
++
++        if is_ec:
++            # This is fix for Bugzilla 1544843
++            args.extend([
++                '--keyOpFlagsOn', 'sign',
++                '--keyOpFlagsOff', 'derive',
++            ])
++
++            # When we want to generate a new EC key, we have to know the curve
++            # we want to use. This is either passed via the curve parameter or
++            # via the key_size parameter. If neither is specified, we have a
++            # problem. If both are specified and differ, we're confused. The
++            # reason is because the curve determines the size of the key;
++            # after that you don't have a choice.
++            if not curve and not key_size:
++                msg = "Must specify the curve to use when generating an "
++                msg += "elliptic curve key."
++                raise ValueError(msg)
++            if curve and key_size and curve != key_size:
++                msg = "Specified both curve (%s) and key size (%s) when "
++                msg += "generating an elliptic curve key, but they differ."
++                raise ValueError(msg % (curve, key_size))
++
++            if curve:
++                args.extend(['-q', str(curve)])
++            else:
++                args.extend(['-q', str(key_size)])
++        else:
++            if key_size:
++                args.extend(['-g', str(key_size)])
++
++        return args
+-- 
+1.8.3.1
+
+
+From 304a130418f9b5ed453b31931c635c186147c042 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 10 Nov 2021 15:07:14 -0800
+Subject: [PATCH 2/4] Bug1998597-TPS-profile-enforce-permitted-agents
+
+this patch addresses additional issues for https://bugzilla.redhat.com/show_bug.cgi?id=1979710
+
+This patch specifically addresses the pki cli "tps-cert-find" option.
+e.g. # pki -d /opt/pki/certdb -P https -p 25443 -h localhost -c SECret.123 -n 'TPS_AgentV' tps-cert-find --token 40906145C76224192D11
+
+additional restrictions are added to TokenService.java replaceToken and
+removeToken methods
+where I do not see direct access to as a "just in case" move.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1998597
+
+(cherry picked from commit a7ace46d55bb290cc34767fab11bf72736e86342)
+---
+ .../dogtagpki/server/tps/rest/TPSCertService.java  | 65 ++++++++++++++++++++--
+ .../dogtagpki/server/tps/rest/TokenService.java    | 39 ++++++++++++-
+ 2 files changed, 96 insertions(+), 8 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/TPSCertService.java b/base/tps/src/org/dogtagpki/server/tps/rest/TPSCertService.java
+index 95f7a61..f4a1f3c 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/TPSCertService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/TPSCertService.java
+@@ -21,8 +21,10 @@ package org.dogtagpki.server.tps.rest;
+ import java.io.UnsupportedEncodingException;
+ import java.net.URI;
+ import java.net.URLEncoder;
++
+ import java.util.HashMap;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Map;
+ 
+ import javax.ws.rs.core.Response;
+@@ -32,13 +34,19 @@ import org.dogtagpki.server.tps.dbs.TPSCertDatabase;
+ import org.dogtagpki.server.tps.dbs.TPSCertRecord;
+ import org.jboss.resteasy.plugins.providers.atom.Link;
+ 
++import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.base.BadRequestException;
+ import com.netscape.certsrv.base.PKIException;
+ import com.netscape.certsrv.tps.cert.TPSCertCollection;
+ import com.netscape.certsrv.tps.cert.TPSCertData;
+ import com.netscape.certsrv.tps.cert.TPSCertResource;
++import org.dogtagpki.server.tps.dbs.TokenDatabase;
++import org.dogtagpki.server.tps.dbs.TokenRecord;
+ import com.netscape.cms.servlet.base.PKIService;
++import com.netscape.certsrv.user.UserResource;
++import com.netscape.certsrv.usrgrp.IUGSubsystem;
++import com.netscape.certsrv.usrgrp.IUser;
+ 
+ /**
+  * @author Endi S. Dewata
+@@ -98,6 +106,8 @@ public class TPSCertService extends PKIService implements TPSCertResource {
+ 
+     @Override
+     public Response findCerts(String filter, String tokenID, Integer start, Integer size) {
++        String method = "TPSCertService:findCerts: ";
++        String msg = "";
+ 
+         CMS.debug("TPSCertService.findCerts(" + filter + ", " + tokenID + ", " + start + ", " + size + ")");
+ 
+@@ -116,24 +126,43 @@ public class TPSCertService extends PKIService implements TPSCertResource {
+         size = size == null ? DEFAULT_SIZE : size;
+ 
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TPSSubsystem subsystem = (TPSSubsystem)CMS.getSubsystem(TPSSubsystem.ID);
++            TokenDatabase tokDatabase = subsystem.getTokenDatabase();
++            TokenRecord record = tokDatabase.getRecord(tokenID);
++            if (record == null) {
++                msg = "Token record not found";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++            String type = record.getType();
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type))
++                throw new PKIException(method + "Token record restricted");
++
++            // token was from an authorized profile
+             TPSCertDatabase database = subsystem.getCertDatabase();
+ 
+-            Iterator<TPSCertRecord> activities = database.findRecords(filter, attributes).iterator();
++            Iterator<TPSCertRecord> certRecs = database.findRecords(filter, attributes).iterator();
+ 
+             TPSCertCollection response = new TPSCertCollection();
+             int i = 0;
+ 
+             // skip to the start of the page
+-            for ( ; i<start && activities.hasNext(); i++) activities.next();
++            for ( ; i<start && certRecs.hasNext(); i++) certRecs.next();
+ 
+             // return entries up to the page size
+-            for ( ; i<start+size && activities.hasNext(); i++) {
+-                response.addEntry(createCertData(activities.next()));
++            for ( ; i<start+size && certRecs.hasNext(); i++) {
++                response.addEntry(createCertData(certRecs.next()));
+             }
+ 
+             // count the total entries
+-            for ( ; activities.hasNext(); i++) activities.next();
++            for ( ; certRecs.hasNext(); i++) certRecs.next();
+             response.setTotal(i);
+ 
+             if (start > 0) {
+@@ -156,14 +185,27 @@ public class TPSCertService extends PKIService implements TPSCertResource {
+ 
+     @Override
+     public Response getCert(String certID) {
++       String method = "TPSCertService:getCert: ";
++       String msg = "";
+ 
+         if (certID == null) throw new BadRequestException("Certificate ID is null.");
+ 
+         CMS.debug("TPSCertService.getCert(\"" + certID + "\")");
+ 
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TPSSubsystem subsystem = (TPSSubsystem)CMS.getSubsystem(TPSSubsystem.ID);
+             TPSCertDatabase database = subsystem.getCertDatabase();
++            TPSCertRecord certRec = database.getRecord(certID);
++            String type = certRec.getKeyType();
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type))
++                   throw new PKIException(method + "Cert record restricted");
+ 
+             return createOKResponse(createCertData(database.getRecord(certID)));
+ 
+@@ -172,4 +214,17 @@ public class TPSCertService extends PKIService implements TPSCertResource {
+             throw new PKIException(e.getMessage());
+         }
+     }
++
++    /*
++     * returns a list of TPS profiles allowed for the current user
++     */
++    List<String> getAuthorizedProfiles()
++           throws Exception {
++        String method = "TokenService.getAuthorizedProfiles: ";
++
++        PKIPrincipal pkiPrincipal = (PKIPrincipal) servletRequest.getUserPrincipal();
++        IUser user = pkiPrincipal.getUser();
++
++        return user.getTpsProfiles();
++    }
+ }
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+index a7a6022..d2a3444 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+@@ -394,9 +394,9 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+         String method = "TokenService.retrieveTokensWithoutVLV: ";
+ 
+-	List<TokenRecord> tokens = (List<TokenRecord>) database.findRecords(filter);
+-	int total = tokens.size();
+-	CMS.debug(method + "total: " + total);
++        List<TokenRecord> tokens = (List<TokenRecord>) database.findRecords(filter);
++        int total = tokens.size();
++        CMS.debug(method + "total: " + total);
+ 
+         List<String> authorizedProfiles = getAuthorizedProfiles();
+ 
+@@ -596,9 +596,26 @@ public class TokenService extends SubsystemService implements TokenResource {
+         TokenRecord tokenRecord = null;
+         String msg = "replace token";
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TokenDatabase database = subsystem.getTokenDatabase();
+ 
+             tokenRecord = database.getRecord(tokenID);
++            if (tokenRecord == null) {
++                msg = "Token record not found";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
++            String type = tokenRecord.getType();
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type))
++                   throw new PKIException(method + "Token record restricted");
++
+             tokenRecord.setUserID(remoteUser);
+             auditModParams.put("userID", remoteUser);
+             tokenRecord.setType(tokenData.getType());
+@@ -921,8 +938,24 @@ public class TokenService extends SubsystemService implements TokenResource {
+         TokenRecord tokenRecord = null;
+         String msg = "remove token";
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TokenDatabase database = subsystem.getTokenDatabase();
+             tokenRecord = database.getRecord(tokenID);
++            if (tokenRecord == null) {
++                msg = "Token record not found";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
++            String type = tokenRecord.getType();
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type))
++                   throw new PKIException(method + "Token record restricted");
+ 
+             //delete all certs associated with this token
+             CMS.debug(method + "about to remove all certificates associated with the token first");
+-- 
+1.8.3.1
+
+
+From 4c190532fd0fb8ce1b1337a39fb3b3686f4df5a2 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 14 Dec 2021 17:25:02 -0800
+Subject: [PATCH 3/4] Bug2018608-subCA created with invalid certs (pkispawn
+ single step)
+
+This patch takes care of the issue reported in the following bugs
+  Bug 2018608 - Invalid certificates with creation of subCA (pkispawn single step)
+  Bug 2022071 - KRA subsystem installation pointing to SubCA failed
+
+My investigation reveals that the fix for the following bug contains
+a bug where the subject DN of a certificate could be unintentionally
+recoded:
+Bug 1978017 - PKCS10Client EC Attribute Encoding
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2018608
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2022071
+
+(cherry picked from commit e62ead81cf1e274fd73248d3b4f73d0431792f84)
+---
+ base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java b/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java
+index befceed..a10c6aa 100644
+--- a/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java
++++ b/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java
+@@ -1757,11 +1757,16 @@ public class CryptoUtil {
+             pkcs10 = new PKCS10(key);
+         }
+ 
+-        Name n = getJssName(encodeSubj, subjectName);
+-        ByteArrayOutputStream subjectEncStream = new ByteArrayOutputStream();
+-        n.encode(subjectEncStream);
+-        byte[] b = subjectEncStream.toByteArray();
+-        X500Name name = new X500Name(b);
++        X500Name name = null;
++        if (!encodeSubj)
++            name = new X500Name(subjectName);
++        else {
++            Name n = getJssName(encodeSubj, subjectName);
++            ByteArrayOutputStream subjectEncStream = new ByteArrayOutputStream();
++            n.encode(subjectEncStream);
++            byte[] b = subjectEncStream.toByteArray();
++            name = new X500Name(b);
++        }
+         X500Signer signer = new X500Signer(sig, name);
+ 
+         pkcs10.encodeAndSign(signer);
+-- 
+1.8.3.1
+
+
+From b040a99f81d0d56b1186086cf085a458a4de049c Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 14 Dec 2021 17:36:04 -0800
+Subject: [PATCH 4/4] Bug2018608-(profile fix) subCA created with invalid certs
+ (pkispawn single step)
+
+While investigating Bug 2018608, I found the CA enrollment profile
+caInstallCACert.cfg to have only 2 year validity; Also the
+signingAlgsAllowed list is outdated.
+This patch addresses the aforementioned issues.
+
+related to https://bugzilla.redhat.com/show_bug.cgi?id=2018608
+
+(cherry picked from commit ca78e499ef474dd0dbeefaef44afbbe3bb4e8d59)
+---
+ base/ca/shared/profiles/ca/caInstallCACert.cfg | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/base/ca/shared/profiles/ca/caInstallCACert.cfg b/base/ca/shared/profiles/ca/caInstallCACert.cfg
+index 7c433c0..451c31e 100644
+--- a/base/ca/shared/profiles/ca/caInstallCACert.cfg
++++ b/base/ca/shared/profiles/ca/caInstallCACert.cfg
+@@ -21,17 +21,17 @@ policyset.caCertSet.1.default.name=Subject Name Default
+ policyset.caCertSet.1.default.params.name=
+ policyset.caCertSet.2.constraint.class_id=validityConstraintImpl
+ policyset.caCertSet.2.constraint.name=Validity Constraint
+-policyset.caCertSet.2.constraint.params.range=720
++policyset.caCertSet.2.constraint.params.range=6940
+ policyset.caCertSet.2.constraint.params.notBeforeCheck=false
+ policyset.caCertSet.2.constraint.params.notAfterCheck=false
+ policyset.caCertSet.2.default.class_id=validityDefaultImpl
+ policyset.caCertSet.2.default.name=Validity Default
+-policyset.caCertSet.2.default.params.range=720
++policyset.caCertSet.2.default.params.range=6940
+ policyset.caCertSet.2.default.params.startTime=0
+ policyset.caCertSet.3.constraint.class_id=keyConstraintImpl
+ policyset.caCertSet.3.constraint.name=Key Constraint
+ policyset.caCertSet.3.constraint.params.keyType=-
+-policyset.caCertSet.3.constraint.params.keyParameters=1024,2048,3072,4096,nistp256,nistp384,nistp521
++policyset.caCertSet.3.constraint.params.keyParameters=2048,3072,4096,nistp256,nistp384,nistp521
+ policyset.caCertSet.3.default.class_id=userKeyDefaultImpl
+ policyset.caCertSet.3.default.name=Key Default
+ policyset.caCertSet.4.constraint.class_id=noConstraintImpl
+@@ -80,7 +80,7 @@ policyset.caCertSet.8.default.name=Subject Key Identifier Extension Default
+ policyset.caCertSet.8.default.params.critical=false
+ policyset.caCertSet.9.constraint.class_id=signingAlgConstraintImpl
+ policyset.caCertSet.9.constraint.name=No Constraint
+-policyset.caCertSet.9.constraint.params.signingAlgsAllowed=SHA1withRSA,SHA256withRSA,SHA512withRSA,SHA1withDSA,SHA1withEC,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.caCertSet.9.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
+ policyset.caCertSet.9.default.class_id=signingAlgDefaultImpl
+ policyset.caCertSet.9.default.name=Signing Alg
+ policyset.caCertSet.9.default.params.signingAlg=-
+-- 
+1.8.3.1
+

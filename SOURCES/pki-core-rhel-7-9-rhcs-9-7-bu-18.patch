@@ -1,0 +1,508 @@
+From 316f4cc1c641018d0855faa2e010d7ebbc8da549 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Fri, 10 Jun 2022 17:25:07 +0100
+Subject: [PATCH 1/4] Disable access to external entities when parsing XML
+
+This reduces the vulnerability of XML parsers to XXE (XML external
+entity) injection.
+
+The best way to prevent XXE is to stop using XML altogether, which we do
+plan to do. Until that happens I consider it worthwhile to tighten the
+security here though.
+
+(cherry picked from commit 2ff217fb9b7f66e011df070294c640df2ebf5207)
+---
+ base/common/src/com/netscape/certsrv/client/PKIClient.java       | 1 +
+ .../netscape/cms/servlet/csadmin/SecurityDomainProcessor.java    | 6 +++++-
+ base/test/src/com/netscape/test/TestListener.java                | 5 ++++-
+ base/util/src/com/netscape/cmsutil/xml/XMLObject.java            | 9 +++++++++
+ 4 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/base/common/src/com/netscape/certsrv/client/PKIClient.java b/base/common/src/com/netscape/certsrv/client/PKIClient.java
+index af1636d..10f604f 100644
+--- a/base/common/src/com/netscape/certsrv/client/PKIClient.java
++++ b/base/common/src/com/netscape/certsrv/client/PKIClient.java
+@@ -148,6 +148,7 @@ public class PKIClient {
+         if (verbose) System.out.println("Retrieving CA certificate chain from " + url + ".");
+ 
+         DocumentBuilderFactory documentFactory = DocumentBuilderFactory.newInstance();
++        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+         DocumentBuilder documentBuilder = documentFactory.newDocumentBuilder();
+ 
+         Document document = documentBuilder.parse(url.openStream());
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/csadmin/SecurityDomainProcessor.java b/base/server/cms/src/com/netscape/cms/servlet/csadmin/SecurityDomainProcessor.java
+index 0db1230..7527b58 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/csadmin/SecurityDomainProcessor.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/csadmin/SecurityDomainProcessor.java
+@@ -24,6 +24,7 @@ import java.util.Enumeration;
+ import java.util.Locale;
+ import java.util.Vector;
+ 
++import javax.xml.XMLConstants;
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.transform.OutputKeys;
+ import javax.xml.transform.Transformer;
+@@ -389,7 +390,10 @@ public class SecurityDomainProcessor extends CAProcessor {
+         XMLObject xmlObject = convertDomainInfoToXMLObject(before);
+         Document document = xmlObject.getDocument();
+ 
+-        Transformer transformer = TransformerFactory.newInstance().newTransformer();
++        TransformerFactory transformerFactory = TransformerFactory.newInstance();
++        transformerFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
++        transformerFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
++        Transformer transformer = transformerFactory.newTransformer();
+         transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+         transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "4");
+ 
+diff --git a/base/test/src/com/netscape/test/TestListener.java b/base/test/src/com/netscape/test/TestListener.java
+index 96c4c90..1782030 100644
+--- a/base/test/src/com/netscape/test/TestListener.java
++++ b/base/test/src/com/netscape/test/TestListener.java
+@@ -10,6 +10,7 @@ import java.text.SimpleDateFormat;
+ import java.util.Date;
+ import java.util.TimeZone;
+ 
++import javax.xml.XMLConstants;
+ import javax.xml.parsers.DocumentBuilder;
+ import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.transform.OutputKeys;
+@@ -22,7 +23,6 @@ import org.junit.runner.Description;
+ import org.junit.runner.Result;
+ import org.junit.runner.notification.Failure;
+ import org.junit.runner.notification.RunListener;
+-
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Text;
+@@ -64,9 +64,12 @@ public class TestListener extends RunListener {
+         dateFormat.setTimeZone(TimeZone.getTimeZone("GMT"));
+ 
+         docBuilderFactory = DocumentBuilderFactory.newInstance();
++        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+         docBuilder = docBuilderFactory.newDocumentBuilder();
+ 
+         transFactory = TransformerFactory.newInstance();
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+         trans = transFactory.newTransformer();
+         trans.setOutputProperty(OutputKeys.INDENT, "yes");
+ 
+diff --git a/base/util/src/com/netscape/cmsutil/xml/XMLObject.java b/base/util/src/com/netscape/cmsutil/xml/XMLObject.java
+index a7715ec..d8e0f41 100644
+--- a/base/util/src/com/netscape/cmsutil/xml/XMLObject.java
++++ b/base/util/src/com/netscape/cmsutil/xml/XMLObject.java
+@@ -25,6 +25,7 @@ import java.io.OutputStream;
+ import java.io.StringWriter;
+ import java.util.Vector;
+ 
++import javax.xml.XMLConstants;
+ import javax.xml.parsers.DocumentBuilder;
+ import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+@@ -56,6 +57,7 @@ public class XMLObject {
+     public XMLObject(InputStream s)
+             throws SAXException, IOException, ParserConfigurationException {
+         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
++        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+         DocumentBuilder docBuilder = factory.newDocumentBuilder();
+         mDoc = docBuilder.parse(s);
+     }
+@@ -63,6 +65,7 @@ public class XMLObject {
+     public XMLObject(File f)
+             throws SAXException, IOException, ParserConfigurationException {
+         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
++        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+         DocumentBuilder docBuilder = factory.newDocumentBuilder();
+         mDoc = docBuilder.parse(f);
+     }
+@@ -159,6 +162,8 @@ public class XMLObject {
+     public byte[] toByteArray() throws TransformerConfigurationException, TransformerException {
+         ByteArrayOutputStream bos = new ByteArrayOutputStream();
+         TransformerFactory tranFactory = TransformerFactory.newInstance();
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+         Transformer aTransformer = tranFactory.newTransformer();
+         Source src = new DOMSource(mDoc);
+         Result dest = new StreamResult(bos);
+@@ -169,6 +174,8 @@ public class XMLObject {
+     public void output(OutputStream os)
+             throws TransformerConfigurationException, TransformerException {
+         TransformerFactory tranFactory = TransformerFactory.newInstance();
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+         Transformer aTransformer = tranFactory.newTransformer();
+         Source src = new DOMSource(mDoc);
+         Result dest = new StreamResult(os);
+@@ -177,6 +184,8 @@ public class XMLObject {
+ 
+     public String toXMLString() throws TransformerConfigurationException, TransformerException {
+         TransformerFactory tranFactory = TransformerFactory.newInstance();
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
++        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+         Transformer transformer = tranFactory.newTransformer();
+         Source src = new DOMSource(mDoc);
+         StreamResult dest = new StreamResult(new StringWriter());
+-- 
+1.8.3.1
+
+
+From 4ef4c7722d5519a8099ad8f9aa0c87a645d26c8b Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Mon, 16 May 2022 12:06:31 -0400
+Subject: [PATCH 2/4] Bug2070766-caServerKeygen_DirUserCert subject constraints
+
+This patch replaces input of cert subject to that of the auth token.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2070766
+
+(cherry picked from commit 3548bdf814ad32e1745b701b8ec5f71eebd376cf)
+---
+ base/ca/shared/profiles/ca/caServerKeygen_DirUserCert.cfg | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/base/ca/shared/profiles/ca/caServerKeygen_DirUserCert.cfg b/base/ca/shared/profiles/ca/caServerKeygen_DirUserCert.cfg
+index ea1acfb..1ff6898 100644
+--- a/base/ca/shared/profiles/ca/caServerKeygen_DirUserCert.cfg
++++ b/base/ca/shared/profiles/ca/caServerKeygen_DirUserCert.cfg
+@@ -4,10 +4,8 @@ enable=true
+ enableBy=admin
+ name=Directory-authenticated User Dual-Use Certificate Enrollment using server-side Key generation
+ auth.instance_id=UserDirEnrollment
+-input.list=i1,i2,i3
++input.list=i1
+ input.i1.class_id=serverKeygenInputImpl
+-input.i2.class_id=subjectNameInputImpl
+-input.i3.class_id=submitterInfoInputImpl
+ output.list=o1
+ output.o1.class_id=pkcs12OutputImpl
+ policyset.list=userCertSet
+@@ -16,7 +14,7 @@ policyset.userCertSet.1.constraint.class_id=subjectNameConstraintImpl
+ policyset.userCertSet.1.constraint.name=Subject Name Constraint
+ policyset.userCertSet.1.constraint.params.pattern=UID=.*
+ policyset.userCertSet.1.constraint.params.accept=true
+-policyset.userCertSet.1.default.class_id=userSubjectNameDefaultImpl
++policyset.userCertSet.1.default.class_id=authTokenSubjectNameDefaultImpl
+ policyset.userCertSet.1.default.name=Subject Name Default
+ policyset.userCertSet.1.default.params.name=
+ policyset.userCertSet.10.constraint.class_id=renewGracePeriodConstraintImpl
+@@ -93,7 +91,7 @@ policyset.userCertSet.8.default.class_id=subjectAltNameExtDefaultImpl
+ policyset.userCertSet.8.default.name=Subject Alt Name Constraint
+ policyset.userCertSet.8.default.params.subjAltNameExtCritical=false
+ policyset.userCertSet.8.default.params.subjAltExtType_0=RFC822Name
+-policyset.userCertSet.8.default.params.subjAltExtPattern_0=$request.requestor_email$
++policyset.userCertSet.8.default.params.subjAltExtPattern_0=$request.auth_token.mail[0]$
+ policyset.userCertSet.8.default.params.subjAltExtGNEnable_0=true
+ policyset.userCertSet.8.default.params.subjAltNameNumGNs=1
+ policyset.userCertSet.9.constraint.class_id=signingAlgConstraintImpl
+-- 
+1.8.3.1
+
+
+From 40c0f7f4150c00e4c26c475b09e5f196d2b893bd Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@cfu-rhel84-nonfips-3.sjc.redhat.com>
+Date: Wed, 27 Jul 2022 19:33:04 -0400
+Subject: [PATCH 3/4] Bug2070766 - upgrade-caServerKeygen_DirUserCert-profile
+
+This patch provides the upgrade script to change the profile
+ caServerKeygen_DirUserCert.cfg in an existing ca instance.
+
+fix 2 for bug https://bugzilla.redhat.com/show_bug.cgi?id=2070766
+
+(cherry picked from commit fc7d0612eb29fa4f9263c1f2fc5d4b1c21f386e6)
+---
+ .../10.5.18/02-FixSSKDirUserCertProfileAuth.py     | 44 ++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+ create mode 100644 base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py
+
+diff --git a/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py b/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py
+new file mode 100644
+index 0000000..3792cd3
+--- /dev/null
++++ b/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py
+@@ -0,0 +1,44 @@
++# Authors:
++#     Christina Fu <cfu@redhat.com>
++#
++# Copyright Red Hat, Inc.
++#
++# SPDX-License-Identifier: GPL-2.0-or-later
++
++from __future__ import absolute_import
++import logging
++import os
++
++import pki
++
++logger = logging.getLogger(__name__)
++
++
++class FixSSKDirUserCertProfileAuth(pki.server.upgrade.PKIServerUpgradeScriptlet):
++
++    def __init__(self):
++        super(FixSSKDirUserCertProfileAuth, self).__init__()
++        self.message = 'Fix the authentication for caServerKeygen_UserCert profile'
++
++    def upgrade_subsystem(self, instance, subsystem):
++
++        if subsystem.name != 'ca':
++            return
++
++        path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caServerKeygen_UserCert.cfg')
++        self.backup(path)
++
++        config = {}
++
++        logger.info('Loading %s', path)
++        pki.util.load_properties(path, config)
++
++        config['input.list'] = 'i1'
++        config.pop('input.i2.class_id', None)
++        config.pop('input.i3.class_id', None)
++        config['policyset.userCertSet.1.default.class_id'] = 'authTokenSubjectNameDefaultImpl'
++        config['policyset.userCertSet.8.default.params.subjAltExtPattern_0'] = \
++            '$request.auth_token.mail[0]$'
++
++        logger.info('Storing %s', path)
++        pki.util.store_properties(path, config)
+-- 
+1.8.3.1
+
+
+From 82d407d0a31cc1c55766cf83fc05b9a80c3c07e3 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Fri, 5 Aug 2022 19:43:10 +0100
+Subject: [PATCH 4/4] Drop erroneous *.py extension from backported upgrade
+ script. (cherry picked from commit 652410871ebc379c05dd8306b1f9a47678322def)
+
+---
+ .../10.5.18/02-FixSSKDirUserCertProfileAuth        | 44 ++++++++++++++++++++++
+ .../10.5.18/02-FixSSKDirUserCertProfileAuth.py     | 44 ----------------------
+ 2 files changed, 44 insertions(+), 44 deletions(-)
+ create mode 100644 base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth
+ delete mode 100644 base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py
+
+diff --git a/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth b/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth
+new file mode 100644
+index 0000000..3792cd3
+--- /dev/null
++++ b/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth
+@@ -0,0 +1,44 @@
++# Authors:
++#     Christina Fu <cfu@redhat.com>
++#
++# Copyright Red Hat, Inc.
++#
++# SPDX-License-Identifier: GPL-2.0-or-later
++
++from __future__ import absolute_import
++import logging
++import os
++
++import pki
++
++logger = logging.getLogger(__name__)
++
++
++class FixSSKDirUserCertProfileAuth(pki.server.upgrade.PKIServerUpgradeScriptlet):
++
++    def __init__(self):
++        super(FixSSKDirUserCertProfileAuth, self).__init__()
++        self.message = 'Fix the authentication for caServerKeygen_UserCert profile'
++
++    def upgrade_subsystem(self, instance, subsystem):
++
++        if subsystem.name != 'ca':
++            return
++
++        path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caServerKeygen_UserCert.cfg')
++        self.backup(path)
++
++        config = {}
++
++        logger.info('Loading %s', path)
++        pki.util.load_properties(path, config)
++
++        config['input.list'] = 'i1'
++        config.pop('input.i2.class_id', None)
++        config.pop('input.i3.class_id', None)
++        config['policyset.userCertSet.1.default.class_id'] = 'authTokenSubjectNameDefaultImpl'
++        config['policyset.userCertSet.8.default.params.subjAltExtPattern_0'] = \
++            '$request.auth_token.mail[0]$'
++
++        logger.info('Storing %s', path)
++        pki.util.store_properties(path, config)
+diff --git a/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py b/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py
+deleted file mode 100644
+index 3792cd3..0000000
+--- a/base/server/upgrade/10.5.18/02-FixSSKDirUserCertProfileAuth.py
++++ /dev/null
+@@ -1,44 +0,0 @@
+-# Authors:
+-#     Christina Fu <cfu@redhat.com>
+-#
+-# Copyright Red Hat, Inc.
+-#
+-# SPDX-License-Identifier: GPL-2.0-or-later
+-
+-from __future__ import absolute_import
+-import logging
+-import os
+-
+-import pki
+-
+-logger = logging.getLogger(__name__)
+-
+-
+-class FixSSKDirUserCertProfileAuth(pki.server.upgrade.PKIServerUpgradeScriptlet):
+-
+-    def __init__(self):
+-        super(FixSSKDirUserCertProfileAuth, self).__init__()
+-        self.message = 'Fix the authentication for caServerKeygen_UserCert profile'
+-
+-    def upgrade_subsystem(self, instance, subsystem):
+-
+-        if subsystem.name != 'ca':
+-            return
+-
+-        path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caServerKeygen_UserCert.cfg')
+-        self.backup(path)
+-
+-        config = {}
+-
+-        logger.info('Loading %s', path)
+-        pki.util.load_properties(path, config)
+-
+-        config['input.list'] = 'i1'
+-        config.pop('input.i2.class_id', None)
+-        config.pop('input.i3.class_id', None)
+-        config['policyset.userCertSet.1.default.class_id'] = 'authTokenSubjectNameDefaultImpl'
+-        config['policyset.userCertSet.8.default.params.subjAltExtPattern_0'] = \
+-            '$request.auth_token.mail[0]$'
+-
+-        logger.info('Storing %s', path)
+-        pki.util.store_properties(path, config)
+-- 
+1.8.3.1
+
+From b1195c73badd2a4aae9adac52c02a0b075db5e63 Mon Sep 17 00:00:00 2001
+From: Matthew Harmsen <mharmsen@redhat.com>
+Date: Mon, 22 Aug 2022 22:10:55 -0600
+Subject: [PATCH] Fixed various variable name typos for:
+
+Disable access to external entities when parsing XML
+
+This reduces the vulnerability of XML parsers to XXE (XML external
+entity) injection.
+
+The best way to prevent XXE is to stop using XML altogether, which we do
+plan to do. Until that happens I consider it worthwhile to tighten the
+security here though.
+---
+ base/common/src/com/netscape/certsrv/client/PKIClient.java | 2 +-
+ base/test/src/com/netscape/test/TestListener.java          | 6 +++---
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/base/common/src/com/netscape/certsrv/client/PKIClient.java b/base/common/src/com/netscape/certsrv/client/PKIClient.java
+index 10f604f..c5f413e 100644
+--- a/base/common/src/com/netscape/certsrv/client/PKIClient.java
++++ b/base/common/src/com/netscape/certsrv/client/PKIClient.java
+@@ -148,7 +148,7 @@ public class PKIClient {
+         if (verbose) System.out.println("Retrieving CA certificate chain from " + url + ".");
+ 
+         DocumentBuilderFactory documentFactory = DocumentBuilderFactory.newInstance();
+-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++        documentFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+         DocumentBuilder documentBuilder = documentFactory.newDocumentBuilder();
+ 
+         Document document = documentBuilder.parse(url.openStream());
+diff --git a/base/test/src/com/netscape/test/TestListener.java b/base/test/src/com/netscape/test/TestListener.java
+index 1782030..d554587 100644
+--- a/base/test/src/com/netscape/test/TestListener.java
++++ b/base/test/src/com/netscape/test/TestListener.java
+@@ -64,12 +64,12 @@ public class TestListener extends RunListener {
+         dateFormat.setTimeZone(TimeZone.getTimeZone("GMT"));
+ 
+         docBuilderFactory = DocumentBuilderFactory.newInstance();
+-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++        docBuilderFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+         docBuilder = docBuilderFactory.newDocumentBuilder();
+ 
+         transFactory = TransformerFactory.newInstance();
+-        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+-        tranFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
++        transFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
++        transFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+         trans = transFactory.newTransformer();
+         trans.setOutputProperty(OutputKeys.INDENT, "yes");
+ 
+-- 
+1.8.3.1
+
+From 9507cb23edcfc0c7c7f873171a6c696f6ca24fc5 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Wed, 5 Oct 2022 16:20:58 +0100
+Subject: [PATCH] Add additional XXE protection for DocumentBuilderFactory
+
+The parser configuration changes backported from master were insufficient.
+Older JDKs have known vulnerabilities with JAXB, and the original changes
+were insufficient protection.
+
+(cherry picked from commit 94e7885c1993d6b5d0a28c9b6810d5f52fe5c91c)
+---
+ base/common/src/com/netscape/certsrv/client/PKIClient.java |  3 +++
+ base/util/src/com/netscape/cmsutil/xml/XMLObject.java      | 10 ++++++++++
+ pki.spec                                                   |  2 +-
+ 3 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/base/common/src/com/netscape/certsrv/client/PKIClient.java b/base/common/src/com/netscape/certsrv/client/PKIClient.java
+index c5f413e..8b6ae30 100644
+--- a/base/common/src/com/netscape/certsrv/client/PKIClient.java
++++ b/base/common/src/com/netscape/certsrv/client/PKIClient.java
+@@ -149,6 +149,9 @@ public class PKIClient {
+ 
+         DocumentBuilderFactory documentFactory = DocumentBuilderFactory.newInstance();
+         documentFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++        documentFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
++        documentFactory.setXIncludeAware(false);
++        documentFactory.setExpandEntityReferences(false);
+         DocumentBuilder documentBuilder = documentFactory.newDocumentBuilder();
+ 
+         Document document = documentBuilder.parse(url.openStream());
+diff --git a/base/util/src/com/netscape/cmsutil/xml/XMLObject.java b/base/util/src/com/netscape/cmsutil/xml/XMLObject.java
+index d8e0f41..f3388ae 100644
+--- a/base/util/src/com/netscape/cmsutil/xml/XMLObject.java
++++ b/base/util/src/com/netscape/cmsutil/xml/XMLObject.java
+@@ -50,6 +50,10 @@ public class XMLObject {
+ 
+     public XMLObject() throws ParserConfigurationException {
+         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
++        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++        factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
++        factory.setXIncludeAware(false);
++        factory.setExpandEntityReferences(false);
+         DocumentBuilder docBuilder = factory.newDocumentBuilder();
+         mDoc = docBuilder.newDocument();
+     }
+@@ -58,6 +62,9 @@ public class XMLObject {
+             throws SAXException, IOException, ParserConfigurationException {
+         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++        factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
++        factory.setXIncludeAware(false);
++        factory.setExpandEntityReferences(false);
+         DocumentBuilder docBuilder = factory.newDocumentBuilder();
+         mDoc = docBuilder.parse(s);
+     }
+@@ -66,6 +73,9 @@ public class XMLObject {
+             throws SAXException, IOException, ParserConfigurationException {
+         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++        factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
++        factory.setXIncludeAware(false);
++        factory.setExpandEntityReferences(false);
+         DocumentBuilder docBuilder = factory.newDocumentBuilder();
+         mDoc = docBuilder.parse(f);
+     }
+-- 
+1.8.3.1
+

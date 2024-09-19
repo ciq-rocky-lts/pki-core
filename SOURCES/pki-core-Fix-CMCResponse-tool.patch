@@ -1,0 +1,57 @@
+From a391af8c91b8ad108b4111c0e671bce43193bf19 Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Thu, 21 May 2020 16:36:44 -0700
+Subject: [PATCH] Related: Bug 1710109 - add RSA PSS support. (#418)
+
+This fix is to the CMCRespone tool.
+
+The tool currently does not initialize the CryptoManager.
+Doing so is necessary to register the JSS Provider which provides the
+encoding / parsing support for the RSAPSS algorithm parameters.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit ece00d4c2cbacf187b9f44873ff70e90497e5ccd)
+---
+ base/java-tools/src/com/netscape/cmstools/CMCResponse.java | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/base/java-tools/src/com/netscape/cmstools/CMCResponse.java b/base/java-tools/src/com/netscape/cmstools/CMCResponse.java
+index 5d4f6c6..d98ab0a 100644
+--- a/base/java-tools/src/com/netscape/cmstools/CMCResponse.java
++++ b/base/java-tools/src/com/netscape/cmstools/CMCResponse.java
+@@ -53,6 +53,7 @@ import org.mozilla.jss.pkix.cmc.TaggedAttribute;
+ import org.mozilla.jss.pkix.cms.ContentInfo;
+ import org.mozilla.jss.pkix.cms.EncapsulatedContentInfo;
+ import org.mozilla.jss.pkix.cms.SignedData;
++import org.mozilla.jss.CryptoManager;
+ 
+ import com.netscape.cmsutil.util.Utils;
+ import netscape.security.pkcs.PKCS7;
+@@ -352,8 +353,7 @@ public class CMCResponse {
+ 
+         CommandLine cmd = parser.parse(options, args, true);
+ 
+-        @SuppressWarnings("unused")
+-        String database = cmd.getOptionValue("d");
++        String dbdir = cmd.getOptionValue("d");
+ 
+         String input = cmd.getOptionValue("i");
+         String output = cmd.getOptionValue("o");
+@@ -370,6 +370,14 @@ public class CMCResponse {
+             System.exit(1);
+         }
+ 
++        //Intialize the crypto manager, just in case we need to use the JSS Provider to parse 
++        //algorithm parameters. All we have to do is initialize the manager and be done.
++
++        if (dbdir == null)
++            dbdir = ".";
++
++        CryptoManager.initialize(dbdir);
++
+         // load CMC response
+         byte[] data = Files.readAllBytes(Paths.get(input));
+ 
+-- 
+1.8.3.1
+

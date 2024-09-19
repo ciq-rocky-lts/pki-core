@@ -1,0 +1,224 @@
+From 1e6afa85e7d129c09bd922108201a2b12aec34b2 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Fri, 17 Mar 2023 11:21:01 +0000
+Subject: [PATCH 1/4] Fix token filtering in TPS UI
+
+Only the filter created from input in the search bar was being
+used to compose the ldapsearch query. The attributes were passed
+across from the client and into the processing method but were not
+then passed on to the database.
+
+Resolves #2179305
+
+(cherry picked from commit a4d8c4bde3c76b169745b495aa5f9f037727bbc9)
+---
+ base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+index 5256a66..68b49c2 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+@@ -25,7 +25,6 @@ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Date;
+ import java.util.HashMap;
+-import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.MissingResourceException;
+@@ -39,9 +38,7 @@ import org.dogtagpki.server.tps.dbs.ActivityDatabase;
+ import org.dogtagpki.server.tps.dbs.TokenDatabase;
+ import org.dogtagpki.server.tps.dbs.TokenRecord;
+ import org.dogtagpki.server.tps.engine.TPSEngine;
+-import org.jboss.resteasy.plugins.providers.atom.Link;
+ 
+-import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.base.BadRequestException;
+ import com.netscape.certsrv.base.IConfigStore;
+@@ -57,8 +54,8 @@ import com.netscape.certsrv.tps.token.TokenData.TokenStatusData;
+ import com.netscape.certsrv.tps.token.TokenResource;
+ import com.netscape.certsrv.tps.token.TokenStatus;
+ import com.netscape.certsrv.user.UserResource;
+-import com.netscape.certsrv.usrgrp.IUGSubsystem;
+ import com.netscape.certsrv.usrgrp.IUser;
++import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.cms.servlet.base.SubsystemService;
+ 
+ import netscape.ldap.LDAPException;
+@@ -411,7 +408,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+         String method = "TokenService.retrieveTokensWithoutVLV: ";
+ 
+-        List<TokenRecord> tokens = (List<TokenRecord>) database.findRecords(filter);
++        List<TokenRecord> tokens = (List<TokenRecord>) database.findRecords(filter, attributes);
+         int total = tokens.size();
+         CMS.debug(method + "total: " + total);
+ 
+-- 
+1.8.3.1
+
+
+From 1ad110d0c3a5d4fe452353bdc33b04d23f869584 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Fri, 17 Mar 2023 11:24:32 +0000
+Subject: [PATCH 2/4] Fix token filtering in TPS UI
+
+Only the filter created from input in the search bar was being
+used to compose the ldapsearch query. The attributes were passed
+across from the client and into the processing method but were not
+then passed on to the database.
+
+Resolves #2179305
+
+(cherry picked from commit a6a412ed3a0f6b42656814c798151a0572c80c91)
+---
+ base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+index 68b49c2..e21953f 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+@@ -25,6 +25,7 @@ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Date;
+ import java.util.HashMap;
++import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.MissingResourceException;
+@@ -38,7 +39,9 @@ import org.dogtagpki.server.tps.dbs.ActivityDatabase;
+ import org.dogtagpki.server.tps.dbs.TokenDatabase;
+ import org.dogtagpki.server.tps.dbs.TokenRecord;
+ import org.dogtagpki.server.tps.engine.TPSEngine;
++import org.jboss.resteasy.plugins.providers.atom.Link;
+ 
++import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.base.BadRequestException;
+ import com.netscape.certsrv.base.IConfigStore;
+@@ -54,8 +57,8 @@ import com.netscape.certsrv.tps.token.TokenData.TokenStatusData;
+ import com.netscape.certsrv.tps.token.TokenResource;
+ import com.netscape.certsrv.tps.token.TokenStatus;
+ import com.netscape.certsrv.user.UserResource;
++import com.netscape.certsrv.usrgrp.IUGSubsystem;
+ import com.netscape.certsrv.usrgrp.IUser;
+-import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.cms.servlet.base.SubsystemService;
+ 
+ import netscape.ldap.LDAPException;
+-- 
+1.8.3.1
+
+
+From e1f0f4d62d2de51a7c655f56896be07aca0c4c8d Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 24 Jan 2023 17:47:01 -0800
+Subject: [PATCH 3/4] Bug2092522_StatusChange per config for revokeCert and
+ revokeExpiredCert
+
+This patch fixes "part 1" and "part 3" of Bug 2092522 where it is reported that
+ 1. if op.enroll.xxx.revokeCert=false, an error message is received at attempt to change token status. e.g.
+"certificate revocation (serial 0x100024e) not enabled for tokenType: KeyGR, keyType: encryption, state: terminated"
+ 2. It also should addresses the request in comment#6 regarding expired cert.
+  For that to work, one needs to enable:
+"op.enroll." + tokenType + ".keyGen." + keyType + ".recovery." + tokenReason + ".revokeExpiredCerts"
+
+fixes part 1&3 of https://bugzilla.redhat.com/show_bug.cgi?id=2092522
+
+(cherry picked from commit 5560fe03f02a113583ba6b7f93e191d602b75876)
+---
+ base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+index 147f346..c57a6f4 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+@@ -671,9 +671,14 @@ public class TPSTokendb {
+             tdbActivity(ActivityDatabase.OP_CERT_REVOCATION, tokenRecord,
+                     ipAddress, logMsg, "success", remoteUser);
+ 
+-        } catch (Exception e) {
++        } catch (TPSException e) {
+             logMsg = "certificate not revoked: " + cert.getSerialNumber() + ": " + e;
+             CMS.debug(method + ": " + logMsg);
++            if (e.getStatus() == TPSStatus.STATUS_NO_ERROR) {
++                tdbActivity(ActivityDatabase.OP_TOKEN_MODIFY, tokenRecord,
++                        ipAddress, e.getMessage(), "success", remoteUser);
++                return;
++            }
+ 
+             tdbActivity(ActivityDatabase.OP_CERT_REVOCATION, tokenRecord,
+                     ipAddress, e.getMessage(), "failure", remoteUser);
+@@ -787,7 +792,8 @@ public class TPSTokendb {
+                     "certificate revocation (serial " + cert.getSerialNumber() +
+                     ") not enabled for tokenType: " + tokenType +
+                     ", keyType: " + keyType +
+-                    ", state: " + tokenReason);
++                    ", state: " + tokenReason,
++                    TPSStatus.STATUS_NO_ERROR);
+         }
+ 
+         // check if expired certificates should be revoked.
+@@ -801,11 +807,11 @@ public class TPSTokendb {
+             Date now = new Date();
+             if (now.after(notAfter)) {
+                 throw new TPSException(
+-                        "revocation not enabled for expired cert: " + cert.getSerialNumber());
++                        "revocation not enabled for expired cert: " + cert.getSerialNumber(), TPSStatus.STATUS_NO_ERROR);
+             }
+             if (now.before(notBefore)) {
+                 throw new TPSException(
+-                        "revocation not enabled for cert that is not yet valid: " + cert.getSerialNumber());
++                        "revocation not enabled for cert that is not yet valid: " + cert.getSerialNumber(), TPSStatus.STATUS_NO_ERROR);
+             }
+         }
+ 
+-- 
+1.8.3.1
+
+
+From 2e8d3dfa75370d1e8d64da458ebd1dde6b370204 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Mon, 20 Mar 2023 16:13:42 -0700
+Subject: [PATCH 4/4] 
+ Bug2176233_part2_StatusChange_holdRevocationUntilLastCredential
+
+This patch requires the previous commit that addresses part 1&3 of the
+    bug.  This previous commit for bug 2092522 must be applied first.
+
+    This patch addresses "part 2" of the original Bug 2092522
+    ("part 2" has been cloned to bug 2176233).
+    The issue reported regards holdRevocationUntilLastCredential
+    when if set, and if there are shared tokens existing, an error
+    Exception is thrown.
+
+    fixes part 2 of https://bugzilla.redhat.com/show_bug.cgi?id=2176233
+
+(cherry picked from commit f3e34a63b7d016920c1aa9792fdbc42d3b9a9b14)
+---
+ base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+index c57a6f4..e27512a 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+@@ -824,8 +824,9 @@ public class TPSTokendb {
+             if (!isLastActiveSharedCert(cert.getSerialNumber(), cert.getIssuedBy(), tokenRecord.getId())) {
+                 msg = "revocation not permitted as certificate " + cert.getSerialNumber() +
+                         " is shared by another active token";
+-                CMS.debug(method + " holdRevocation true; " + msg);
+-                throw new TPSException(msg);
++                CMS.debug(method + " holdRevocationUntilLastCredential true; " + msg);
++                throw new TPSException(msg,
++                    TPSStatus.STATUS_NO_ERROR);
+             }
+         }
+         CMS.debug(method + "revocation allowed.");
+-- 
+1.8.3.1
+

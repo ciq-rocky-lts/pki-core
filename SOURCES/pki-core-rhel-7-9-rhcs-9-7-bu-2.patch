@@ -1,0 +1,722 @@
+From 6bd383b5f142c4f2795bb3bfb2db167981622a9d Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Wed, 30 Sep 2020 13:35:25 -0400
+Subject: [PATCH 1/6] Resolve: Bug 1710978 - TPS - Add logging to
+ tdbAddCertificatesForCUID if adding or searching for cert record fails (#559)
+
+Submitted by RHCS-maint.
+
+    This fix provides better logging when the update to the token db sufferes a partial or complete failure.
+
+    Due to the unlikelyness of this happening in practice, this fix provides a simple config based way to simulate
+    the issue, such that the log activity can be easily observed just as if had happened during an actual failure.
+
+    Set the following in the TPS's CS.cfg:
+
+    op.enroll.testAddCertsToDBFailure=true.
+
+    The setting is false by default.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit d7f2b72dd4fe9cd21de70fb8ce1806f66aec3624)
+---
+ .../src/org/dogtagpki/server/tps/TPSTokendb.java   | 76 ++++++++++++++++++----
+ .../server/tps/processor/TPSEnrollProcessor.java   | 14 +++-
+ 2 files changed, 75 insertions(+), 15 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+index 446fa3f..7434502 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+@@ -241,25 +241,75 @@ public class TPSTokendb {
+ 
+         CMS.debug(method + " found token " + cuid);
+         CMS.debug(method + " number of certs to update:" + certs.size());
++
++         // Keep track of which certs made it to the database and which didn't,
++         // in case of failure
++         class CnIssuerPair {
++             public final String cn;
++             public final String issuer;
++
++             public CnIssuerPair(String _cn, String _issuer) {
++                 cn = _cn;
++                 issuer = _issuer;
++             }
++ 
++             public String toString() {
++                 return "(cn=" + cn + ", issuerCn=" + issuer + ")";
++             }
++         }
++ 
++         ArrayList<CnIssuerPair> cnIssuerPairsRemaining = new ArrayList<CnIssuerPair>(certs.size());
++         for(TPSCertRecord cert : certs) {
++             String cn = cert.getId();
++             String issuerCn = cert.getIssuedBy();
++             cnIssuerPairsRemaining.add(new CnIssuerPair(cn, issuerCn));
++         }
++
++        boolean testAddCertsFailure = false;
++        //Contrive a very difficult to reproduce testing scenario
++
+         try {
++            IConfigStore configStore = CMS.getConfigStore();
++
++            // get conn ID
++            String config = "op.enroll." + "testAddCertsToDBFailure";
++            testAddCertsFailure = configStore.getBoolean(config,false);
++        } catch (Exception e) {
++           testAddCertsFailure = false;
++        }
++        
++        try {
++            int count = 0;
+             for (TPSCertRecord cert : certs) {
+-                try {
+-                    if (!isCertOnToken(cert, cuid)) {
+-                        CMS.debug(method + " adding cert with serial: " + cert.getSerialNumber());
+-                        tps.certDatabase.addRecord(cert.getId(), cert);
+-                    } else {
+-                        // cert already on token
+-                        CMS.debug(method + "retain and skip adding with serial:" + cert.getSerialNumber());
+-                    }
+-                } catch (Exception e) {
+-                    CMS.debug(method + "Exception after isCertOnToken call"+ e.toString());
+-                    // ignore; go to next;
++                if (!isCertOnToken(cert, cuid)) {
++                    CMS.debug(method + " adding cert with serial: " + cert.getSerialNumber());
++                    // After at least one cert is added correctly, perform the test of a failure
++                    // if so configured.
++                   
++                    if(count > 0 && testAddCertsFailure == true) {
++                        throw new Exception(method + ": " + "Failed to add certificate to token db, as part of a test of failure condition.");
++                    }   
++                    tps.certDatabase.addRecord(cert.getId(), cert);
++                } else {
++                    // cert already on token
++                    CMS.debug(method + "retain and skip adding with serial:" + cert.getSerialNumber());
+                 }
++                
++                // Successfully added cert or verified it was already there, so remove
++                // it from the 'remaining' list
++                cnIssuerPairsRemaining.removeIf(p -> (p.cn == cert.getId() && p.issuer == cert.getIssuedBy()));
++                count ++ ;
+             }
+         } catch (Exception e) {
+             CMS.debug(method + e);
+-            // TODO: what if it throws in the middle of the cert list -- some cert records already updated?
+-            throw new TPSException(e.getMessage());
++
++             String subjectDn = certs.get(0).getSubject();
++             String logMsg = method +  ": " +  "Failed to add or verify the following certs for [" + subjectDn + "] in the Certificate DB: ";
++             for(CnIssuerPair pair : cnIssuerPairsRemaining) {
++                 logMsg += pair + "; ";
++             }
++
++             throw new TPSException(logMsg);
+         }
+     }
+ 
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java
+index f1e773a..5175344 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSEnrollProcessor.java
+@@ -618,8 +618,18 @@ public class TPSEnrollProcessor extends TPSProcessor {
+         ArrayList<TPSCertRecord> certRecords = certsInfo.toTPSCertRecords(tokenRecord.getId(), tokenRecord.getUserID());
+ 
+         CMS.debug(method + " adding certs to token with tdbAddCertificatesForCUID...");
+-        tps.tdb.tdbAddCertificatesForCUID(tokenRecord.getId(), certRecords);
+-        CMS.debug(method + " tokendb updated with certs to the cuid so that it reflects what's on the token");
++        try {
++            tps.tdb.tdbAddCertificatesForCUID(tokenRecord.getId(), certRecords);
++            CMS.debug(method + " tokendb updated with certs to the cuid so that it reflects what's on the token");
++        } catch(TPSException e) {
++            CMS.debug(method + " Exception occurred in tdbAddCertificatesForCUID: " + e.getMessage());
++            try {
++                auditEnrollment(userid, "enrollment", appletInfo, "failure", channel.getKeyInfoData().toHexStringPlain(), null, null, e.getMessage());
++                tps.tdb.tdbActivity(ActivityDatabase.OP_ENROLLMENT, tokenRecord, session.getIpAddress(), e.getMessage(), "failure");
++            } catch(Exception f) {
++                CMS.debug(method + " Failed to log previous exception: " + f);
++            }
++        }
+ 
+         String finalAppletVersion = appletInfo.getFinalAppletVersion();
+         if(finalAppletVersion == null)
+-- 
+1.8.3.1
+
+
+From dfaecd2ce22313a0144939f5009cb0096511fceb Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Wed, 30 Sep 2020 13:39:27 -0400
+Subject: [PATCH 2/6] Resolve: Bug 1858860 - TPS - Update Error Codes returned
+ to client (CIW/ESC) to Match CS8. (#564)
+
+This is simply the addition to one very simple patch to the pin reset procedure, that provides
+the proper error code back to the client in 2 very unlikely error scenarios.
+
+RHCS-maint.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit 3c58273ddb5567b86f7aad664f2af5e6560f3928)
+---
+ .../src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java  | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+index de5c634..7d3a7cd 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+@@ -50,7 +50,7 @@ public class TPSPinResetProcessor extends TPSProcessor {
+     @Override
+     public void process(BeginOpMsg beginMsg) throws TPSException, IOException {
+         if (beginMsg == null) {
+-            throw new TPSException("TPSPinResetProcessor.process: invalid input data, not beginMsg provided.",
++            throw new TPSException("TPSPinResetProcessor.process: invalid input data, no beginMsg provided.",
+                     TPSStatus.STATUS_ERROR_MAC_RESET_PIN_PDU);
+         }
+         setBeginMessage(beginMsg);
+@@ -306,7 +306,7 @@ public class TPSPinResetProcessor extends TPSProcessor {
+             logMsg = logMsg + ":" + e.toString();
+             tps.tdb.tdbActivity(ActivityDatabase.OP_PIN_RESET, tokenRecord, session.getIpAddress(), logMsg,
+                     "failure");
+-            throw new TPSException(logMsg);
++            throw new TPSException(logMsg, TPSStatus.STATUS_ERROR_UPDATE_TOKENDB_FAILED);
+         }
+ 
+         CMS.debug(method + ": Token Pin successfully reset!");
+-- 
+1.8.3.1
+
+
+From 6dc155765b9752c9b1e89d442c53b464756df325 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 8 Sep 2020 17:18:49 -0400
+Subject: [PATCH 3/6] Bug1858861 TPS - Server side key generation is not
+ working for Identity only tokens Missing some commits
+
+  This patch relates to Bug 1494591, where the fix was missing a patch.
+
+  It makes it so that as long as one keyType has serverKeyGen enabled then
+  all key tyes under the same tps profile are considered server-side
+  keygen.
+
+  Code submittd by RHCS-MAINT
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1858861
+
+(cherry picked from commit 103a03062c235cc3e51f98e721ca6d72eb1f5a9d)
+---
+ .../server/tps/cms/TKSRemoteRequestHandler.java    | 50 ++++++++++++++++------
+ 1 file changed, 38 insertions(+), 12 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/cms/TKSRemoteRequestHandler.java b/base/tps/src/org/dogtagpki/server/tps/cms/TKSRemoteRequestHandler.java
+index 8155f90..770819d 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/cms/TKSRemoteRequestHandler.java
++++ b/base/tps/src/org/dogtagpki/server/tps/cms/TKSRemoteRequestHandler.java
+@@ -127,9 +127,7 @@ public class TKSRemoteRequestHandler extends RemoteRequestHandler
+                 break;
+             }
+         }
+-
+-
+-
++        CMS.debug(method + " final serverkegGen enabled? " + serverKeygen);
+ 
+         if (keySet == null)
+             keySet = conf.getString("tps.connector." + connid + ".keySet", "defKeySet");
+@@ -264,10 +262,23 @@ public class TKSRemoteRequestHandler extends RemoteRequestHandler
+ 
+         IConfigStore conf = CMS.getConfigStore();
+ 
+-        boolean serverKeygen =
+-                conf.getBoolean("op.enroll." +
+-                        tokenType + ".keyGen.encryption.serverKeygen.enable",
+-                        false);
++        boolean serverKeygen = false;
++
++        //Try out all the currently supported cert types to see if we are doing server side keygen here
++        String[] keygenStrings = { "identity", "signing", "encryption", "authentication", "auth"};
++        for (String keygenString : keygenStrings) {
++            boolean enabled = conf.getBoolean("op.enroll." +
++                    tokenType + ".keyGen." +
++                    keygenString + ".serverKeygen.enable", false);
++
++            CMS.debug(method + " serverkegGen enabled for " + keygenString + " : " + enabled);
++            if (enabled) {
++                serverKeygen = true;
++                break;
++            }
++        }
++        CMS.debug(method + " final serverkegGen enabled? " + serverKeygen);
++
+         if (keySet == null)
+             keySet = conf.getString("tps.connector." + connid + ".keySet", "defKeySet");
+ 
+@@ -427,7 +438,9 @@ public class TKSRemoteRequestHandler extends RemoteRequestHandler
+             String tokenType)
+             throws EBaseException {
+ 
+-        CMS.debug("TKSRemoteRequestHandler: computeSessionKeySCP02(): begins.");
++        String method = "TKSRemoteRequestHandler: computeSessionKeysSCP02(): ";
++
++        CMS.debug(method + " begins.");
+         if (cuid == null || kdd == null || keyInfo == null ||
+                 sequenceCounter == null
+                 || derivationConstant == null) {
+@@ -436,10 +449,23 @@ public class TKSRemoteRequestHandler extends RemoteRequestHandler
+ 
+         IConfigStore conf = CMS.getConfigStore();
+ 
+-        boolean serverKeygen =
+-                conf.getBoolean("op.enroll." +
+-                        tokenType + ".keyGen.encryption.serverKeygen.enable",
+-                        false);
++        boolean serverKeygen = false;
++
++        //Try out all the currently supported cert types to see if we are doing server side keygen here
++        String[] keygenStrings = { "identity", "signing", "encryption", "authentication", "auth"};
++        for (String keygenString : keygenStrings) {
++            boolean enabled = conf.getBoolean("op.enroll." +
++                    tokenType + ".keyGen." +
++                    keygenString + ".serverKeygen.enable", false);
++
++            CMS.debug(method + " serverkegGen enabled for " + keygenString + " : " + enabled);
++            if (enabled) {
++                serverKeygen = true;
++                break;
++            }
++        }
++        CMS.debug(method + " final serverkegGen enabled? " + serverKeygen);
++
+         if (keySet == null)
+             keySet = conf.getString("tps.connector." + connid + ".keySet", "defKeySet");
+ 
+-- 
+1.8.3.1
+
+
+From 9627046fe5d38c447c85ec3a1be75ab86dbdaaac Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 13 Oct 2020 16:19:06 -0700
+Subject: [PATCH 4/6] Bug1883639-add profile caAuditSigningCert
+
+  Existing profiiles caStorageCert.cfg and caTransportCert.cfg
+  should be used for KRA.
+  a caAuditSigningCert profile is added, although I find
+  a misleading profile named caSignedLogCert.cfg  that was intended for
+  the use.  I disabled caSignedLogCert.cfg instead.
+
+  I also removed the SHA1 algorithms from all the *storage* and *audit*
+  profiles while I'm at it.
+
+  The upgrade scripts only adds the new profile caAuditSigningCert.  It
+  does not modify existing profiles or remove those two IPA specific
+  ones.
+
+  fixes https://bugzilla.redhat.com/show_bug.cgi?id=1883639
+
+(cherry picked from commit 73efcea0c74eb4882c003a7fe6cef21fa7627363)
+---
+ base/ca/shared/conf/CS.cfg                         |  4 +-
+ base/ca/shared/profiles/ca/caAuditSigningCert.cfg  | 80 ++++++++++++++++++++++
+ .../profiles/ca/caInternalAuthAuditSigningCert.cfg |  2 +-
+ .../profiles/ca/caInternalAuthDRMstorageCert.cfg   |  2 +-
+ .../profiles/ca/caInternalAuthTransportCert.cfg    |  2 +-
+ base/ca/shared/profiles/ca/caSignedLogCert.cfg     |  4 +-
+ base/ca/shared/profiles/ca/caStorageCert.cfg       |  2 +-
+ base/ca/shared/profiles/ca/caTransportCert.cfg     |  2 +-
+ .../10.5.17/02-AddProfileCaAuditSigningCert        | 52 ++++++++++++++
+ 9 files changed, 142 insertions(+), 8 deletions(-)
+ create mode 100644 base/ca/shared/profiles/ca/caAuditSigningCert.cfg
+ create mode 100644 base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert
+
+diff --git a/base/ca/shared/conf/CS.cfg b/base/ca/shared/conf/CS.cfg
+index 2c50831..1eb8881 100644
+--- a/base/ca/shared/conf/CS.cfg
++++ b/base/ca/shared/conf/CS.cfg
+@@ -976,7 +976,7 @@ oidmap.pse.oid=2.16.840.1.113730.1.18
+ oidmap.subject_info_access.class=netscape.security.extensions.SubjectInfoAccessExtension
+ oidmap.subject_info_access.oid=1.3.6.1.5.5.7.1.11
+ os.userid=nobody
+-profile.list=caCMCserverCert,caCMCECserverCert,caCMCECsubsystemCert,caCMCsubsystemCert,caCMCauditSigningCert,caCMCcaCert,caCMCocspCert,caCMCkraTransportCert,caCMCkraStorageCert,caServerKeygen_UserCert,caServerKeygen_DirUserCert,caUserCert,caECUserCert,caUserSMIMEcapCert,caDualCert,caDirBasedDualCert,AdminCert,ECAdminCert,caSignedLogCert,caTPSCert,caRARouterCert,caRouterCert,caServerCert,caECServerCert,caSubsystemCert,caECSubsystemCert,caOtherCert,caCACert,caCMCcaCert,caCrossSignedCACert,caInstallCACert,caRACert,caOCSPCert,caStorageCert,caTransportCert,caDirPinUserCert,caECDirPinUserCert,caDirUserCert,caECDirUserCert,caAgentServerCert,caECAgentServerCert,caAgentFileSigning,caCMCUserCert,caCMCECUserCert,caFullCMCUserCert,caECFullCMCUserCert,caFullCMCUserSignedCert,caECFullCMCUserSignedCert,caFullCMCSharedTokenCert,caECFullCMCSharedTokenCert,caSimpleCMCUserCert,caECSimpleCMCUserCert,caTokenDeviceKeyEnrollment,caTokenUserEncryptionKeyEnrollment,caTokenUserSigningKeyEnrollment,caTempTokenDeviceKeyEnrollment,caTempTokenUserEncryptionKeyEnrollment,caTempTokenUserSigningKeyEnrollment,caAdminCert,caECAdminCert,caInternalAuthServerCert,caECInternalAuthServerCert,caInternalAuthTransportCert,caInternalAuthDRMstorageCert,caInternalAuthSubsystemCert,caECInternalAuthSubsystemCert,caInternalAuthOCSPCert,caInternalAuthAuditSigningCert,DomainController,caDualRAuserCert,caRAagentCert,caRAserverCert,caUUIDdeviceCert,caSSLClientSelfRenewal,caDirUserRenewal,caManualRenewal,caTokenMSLoginEnrollment,caTokenUserSigningKeyRenewal,caTokenUserEncryptionKeyRenewal,caTokenUserAuthKeyRenewal,caJarSigningCert,caIPAserviceCert,caEncUserCert,caSigningUserCert,caTokenUserDelegateAuthKeyEnrollment,caTokenUserDelegateSigningKeyEnrollment
++profile.list=caCMCserverCert,caCMCECserverCert,caCMCECsubsystemCert,caCMCsubsystemCert,caCMCauditSigningCert,caCMCcaCert,caCMCocspCert,caCMCkraTransportCert,caCMCkraStorageCert,caServerKeygen_UserCert,caServerKeygen_DirUserCert,caUserCert,caECUserCert,caUserSMIMEcapCert,caDualCert,caDirBasedDualCert,AdminCert,ECAdminCert,caAuditSigningCert,caSignedLogCert,caTPSCert,caRARouterCert,caRouterCert,caServerCert,caECServerCert,caSubsystemCert,caECSubsystemCert,caOtherCert,caCACert,caCMCcaCert,caCrossSignedCACert,caInstallCACert,caRACert,caOCSPCert,caStorageCert,caTransportCert,caDirPinUserCert,caECDirPinUserCert,caDirUserCert,caECDirUserCert,caAgentServerCert,caECAgentServerCert,caAgentFileSigning,caCMCUserCert,caCMCECUserCert,caFullCMCUserCert,caECFullCMCUserCert,caFullCMCUserSignedCert,caECFullCMCUserSignedCert,caFullCMCSharedTokenCert,caECFullCMCSharedTokenCert,caSimpleCMCUserCert,caECSimpleCMCUserCert,caTokenDeviceKeyEnrollment,caTokenUserEncryptionKeyEnrollment,caTokenUserSigningKeyEnrollment,caTempTokenDeviceKeyEnrollment,caTempTokenUserEncryptionKeyEnrollment,caTempTokenUserSigningKeyEnrollment,caAdminCert,caECAdminCert,caInternalAuthServerCert,caECInternalAuthServerCert,caInternalAuthTransportCert,caInternalAuthDRMstorageCert,caInternalAuthSubsystemCert,caECInternalAuthSubsystemCert,caInternalAuthOCSPCert,caInternalAuthAuditSigningCert,DomainController,caDualRAuserCert,caRAagentCert,caRAserverCert,caUUIDdeviceCert,caSSLClientSelfRenewal,caDirUserRenewal,caManualRenewal,caTokenMSLoginEnrollment,caTokenUserSigningKeyRenewal,caTokenUserEncryptionKeyRenewal,caTokenUserAuthKeyRenewal,caJarSigningCert,caIPAserviceCert,caEncUserCert,caSigningUserCert,caTokenUserDelegateAuthKeyEnrollment,caTokenUserDelegateSigningKeyEnrollment
+ profile.caUUIDdeviceCert.class_id=caEnrollImpl
+ profile.caUUIDdeviceCert.config=[PKI_INSTANCE_PATH]/[PKI_SUBSYSTEM_TYPE]/profiles/ca/caUUIDdeviceCert.cfg
+ profile.caManualRenewal.class_id=caEnrollImpl
+@@ -1087,6 +1087,8 @@ profile.caECServerCert.class_id=caEnrollImpl
+ profile.caECServerCert.config=[PKI_INSTANCE_PATH]/[PKI_SUBSYSTEM_TYPE]/profiles/ca/caECServerCert.cfg
+ profile.caSignedLogCert.class_id=caEnrollImpl
+ profile.caSignedLogCert.config=[PKI_INSTANCE_PATH]/[PKI_SUBSYSTEM_TYPE]/profiles/ca/caSignedLogCert.cfg
++profile.caAuditSigningCert.class_id=caEnrollImpl
++profile.caAuditSigningCert.config=[PKI_INSTANCE_PATH]/[PKI_SUBSYSTEM_TYPE]/profiles/ca/caAuditSigningCert.cfg
+ profile.caSigningUserCert.class_id=caEnrollImpl
+ profile.caSigningUserCert.config=[PKI_INSTANCE_PATH]/[PKI_SUBSYSTEM_TYPE]/profiles/ca/caSigningUserCert.cfg
+ profile.caSimpleCMCUserCert.class_id=caEnrollImpl
+diff --git a/base/ca/shared/profiles/ca/caAuditSigningCert.cfg b/base/ca/shared/profiles/ca/caAuditSigningCert.cfg
+new file mode 100644
+index 0000000..68dfcad
+--- /dev/null
++++ b/base/ca/shared/profiles/ca/caAuditSigningCert.cfg
+@@ -0,0 +1,80 @@
++desc=This certificate profile is for enrolling audit signing certificates.
++visible=true
++enable=true
++enableBy=admin
++auth.instance_id=
++authz.acl=group="Enterprise OCSP Administrators" || group="Enterprise RA Administrators" || group="Enterprise CA Administrators" || group="Enterprise KRA Administrators" || group="Enterprise TKS Administrators" || group="Enterprise TPS Administrators"
++name=Manual Audit Signing Certificate Enrollment
++input.list=i1,i2
++input.i1.class_id=certReqInputImpl
++input.i2.class_id=submitterInfoInputImpl
++output.list=o1
++output.o1.class_id=certOutputImpl
++policyset.list=auditSigningCertSet
++policyset.auditSigningCertSet.list=1,2,3,4,5,6,9
++policyset.auditSigningCertSet.1.constraint.class_id=subjectNameConstraintImpl
++policyset.auditSigningCertSet.1.constraint.name=Subject Name Constraint
++policyset.auditSigningCertSet.1.constraint.params.pattern=CN=.*
++policyset.auditSigningCertSet.1.constraint.params.accept=true
++policyset.auditSigningCertSet.1.default.class_id=userSubjectNameDefaultImpl
++policyset.auditSigningCertSet.1.default.name=Subject Name Default
++policyset.auditSigningCertSet.1.default.params.name=
++policyset.auditSigningCertSet.2.constraint.class_id=validityConstraintImpl
++policyset.auditSigningCertSet.2.constraint.name=Validity Constraint
++policyset.auditSigningCertSet.2.constraint.params.range=720
++policyset.auditSigningCertSet.2.constraint.params.notBeforeCheck=false
++policyset.auditSigningCertSet.2.constraint.params.notAfterCheck=false
++policyset.auditSigningCertSet.2.default.class_id=validityDefaultImpl
++policyset.auditSigningCertSet.2.default.name=Validity Default
++policyset.auditSigningCertSet.2.default.params.range=720
++policyset.auditSigningCertSet.2.default.params.startTime=0
++policyset.auditSigningCertSet.3.constraint.class_id=keyConstraintImpl
++policyset.auditSigningCertSet.3.constraint.name=Key Constraint
++policyset.auditSigningCertSet.3.constraint.params.keyType=-
++policyset.auditSigningCertSet.3.constraint.params.keyParameters=1024,2048,3072,4096,nistp256,nistp521
++policyset.auditSigningCertSet.3.default.class_id=userKeyDefaultImpl
++policyset.auditSigningCertSet.3.default.name=Key Default
++policyset.auditSigningCertSet.4.constraint.class_id=noConstraintImpl
++policyset.auditSigningCertSet.4.constraint.name=No Constraint
++policyset.auditSigningCertSet.4.default.class_id=authorityKeyIdentifierExtDefaultImpl
++policyset.auditSigningCertSet.4.default.name=Authority Key Identifier Default
++policyset.auditSigningCertSet.5.constraint.class_id=noConstraintImpl
++policyset.auditSigningCertSet.5.constraint.name=No Constraint
++policyset.auditSigningCertSet.5.default.class_id=authInfoAccessExtDefaultImpl
++policyset.auditSigningCertSet.5.default.name=AIA Extension Default
++policyset.auditSigningCertSet.5.default.params.authInfoAccessADEnable_0=true
++policyset.auditSigningCertSet.5.default.params.authInfoAccessADLocationType_0=URIName
++policyset.auditSigningCertSet.5.default.params.authInfoAccessADLocation_0=
++policyset.auditSigningCertSet.5.default.params.authInfoAccessADMethod_0=1.3.6.1.5.5.7.48.1
++policyset.auditSigningCertSet.5.default.params.authInfoAccessCritical=false
++policyset.auditSigningCertSet.5.default.params.authInfoAccessNumADs=1
++policyset.auditSigningCertSet.6.constraint.class_id=keyUsageExtConstraintImpl
++policyset.auditSigningCertSet.6.constraint.name=Key Usage Extension Constraint
++policyset.auditSigningCertSet.6.constraint.params.keyUsageCritical=true
++policyset.auditSigningCertSet.6.constraint.params.keyUsageDigitalSignature=true
++policyset.auditSigningCertSet.6.constraint.params.keyUsageNonRepudiation=true
++policyset.auditSigningCertSet.6.constraint.params.keyUsageDataEncipherment=false
++policyset.auditSigningCertSet.6.constraint.params.keyUsageKeyEncipherment=false
++policyset.auditSigningCertSet.6.constraint.params.keyUsageKeyAgreement=false
++policyset.auditSigningCertSet.6.constraint.params.keyUsageKeyCertSign=false
++policyset.auditSigningCertSet.6.constraint.params.keyUsageCrlSign=false
++policyset.auditSigningCertSet.6.constraint.params.keyUsageEncipherOnly=false
++policyset.auditSigningCertSet.6.constraint.params.keyUsageDecipherOnly=false
++policyset.auditSigningCertSet.6.default.class_id=keyUsageExtDefaultImpl
++policyset.auditSigningCertSet.6.default.name=Key Usage Default
++policyset.auditSigningCertSet.6.default.params.keyUsageCritical=true
++policyset.auditSigningCertSet.6.default.params.keyUsageDigitalSignature=true
++policyset.auditSigningCertSet.6.default.params.keyUsageNonRepudiation=true
++policyset.auditSigningCertSet.6.default.params.keyUsageDataEncipherment=false
++policyset.auditSigningCertSet.6.default.params.keyUsageKeyEncipherment=false
++policyset.auditSigningCertSet.6.default.params.keyUsageKeyAgreement=false
++policyset.auditSigningCertSet.6.default.params.keyUsageKeyCertSign=false
++policyset.auditSigningCertSet.6.default.params.keyUsageCrlSign=false
++policyset.auditSigningCertSet.6.default.params.keyUsageEncipherOnly=false
++policyset.auditSigningCertSet.6.default.params.keyUsageDecipherOnly=false
++policyset.auditSigningCertSet.9.constraint.class_id=signingAlgConstraintImpl
++policyset.auditSigningCertSet.9.constraint.name=No Constraint
++policyset.auditSigningCertSet.9.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.auditSigningCertSet.9.default.class_id=signingAlgDefaultImpl
++policyset.auditSigningCertSet.9.default.name=Signing Alg
++policyset.auditSigningCertSet.9.default.params.signingAlg=-
+diff --git a/base/ca/shared/profiles/ca/caInternalAuthAuditSigningCert.cfg b/base/ca/shared/profiles/ca/caInternalAuthAuditSigningCert.cfg
+index 55cfd8c..86f288e 100644
+--- a/base/ca/shared/profiles/ca/caInternalAuthAuditSigningCert.cfg
++++ b/base/ca/shared/profiles/ca/caInternalAuthAuditSigningCert.cfg
+@@ -74,7 +74,7 @@ policyset.auditSigningCertSet.6.default.params.keyUsageEncipherOnly=false
+ policyset.auditSigningCertSet.6.default.params.keyUsageDecipherOnly=false
+ policyset.auditSigningCertSet.9.constraint.class_id=signingAlgConstraintImpl
+ policyset.auditSigningCertSet.9.constraint.name=No Constraint
+-policyset.auditSigningCertSet.9.constraint.params.signingAlgsAllowed=SHA1withRSA,SHA256withRSA,SHA512withRSA,SHA1withDSA,SHA1withEC,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.auditSigningCertSet.9.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
+ policyset.auditSigningCertSet.9.default.class_id=signingAlgDefaultImpl
+ policyset.auditSigningCertSet.9.default.name=Signing Alg
+ policyset.auditSigningCertSet.9.default.params.signingAlg=-
+diff --git a/base/ca/shared/profiles/ca/caInternalAuthDRMstorageCert.cfg b/base/ca/shared/profiles/ca/caInternalAuthDRMstorageCert.cfg
+index ae9593e..23a0850 100644
+--- a/base/ca/shared/profiles/ca/caInternalAuthDRMstorageCert.cfg
++++ b/base/ca/shared/profiles/ca/caInternalAuthDRMstorageCert.cfg
+@@ -80,7 +80,7 @@ policyset.drmStorageCertSet.7.default.params.exKeyUsageCritical=false
+ policyset.drmStorageCertSet.7.default.params.exKeyUsageOIDs=1.3.6.1.5.5.7.3.2
+ policyset.drmStorageCertSet.9.constraint.class_id=signingAlgConstraintImpl
+ policyset.drmStorageCertSet.9.constraint.name=No Constraint
+-policyset.drmStorageCertSet.9.constraint.params.signingAlgsAllowed=SHA1withRSA,SHA256withRSA,SHA512withRSA,SHA1withDSA,SHA1withEC,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.drmStorageCertSet.9.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
+ policyset.drmStorageCertSet.9.default.class_id=signingAlgDefaultImpl
+ policyset.drmStorageCertSet.9.default.name=Signing Alg
+ policyset.drmStorageCertSet.9.default.params.signingAlg=-
+diff --git a/base/ca/shared/profiles/ca/caInternalAuthTransportCert.cfg b/base/ca/shared/profiles/ca/caInternalAuthTransportCert.cfg
+index 359881e..cbeb0eb 100644
+--- a/base/ca/shared/profiles/ca/caInternalAuthTransportCert.cfg
++++ b/base/ca/shared/profiles/ca/caInternalAuthTransportCert.cfg
+@@ -80,7 +80,7 @@ policyset.transportCertSet.7.default.params.exKeyUsageCritical=false
+ policyset.transportCertSet.7.default.params.exKeyUsageOIDs=1.3.6.1.5.5.7.3.2
+ policyset.transportCertSet.8.constraint.class_id=signingAlgConstraintImpl
+ policyset.transportCertSet.8.constraint.name=No Constraint
+-policyset.transportCertSet.8.constraint.params.signingAlgsAllowed=SHA1withRSA,SHA256withRSA,SHA512withRSA,SHA1withDSA,SHA1withEC,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.transportCertSet.8.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
+ policyset.transportCertSet.8.default.class_id=signingAlgDefaultImpl
+ policyset.transportCertSet.8.default.name=Signing Alg
+ policyset.transportCertSet.8.default.params.signingAlg=-
+diff --git a/base/ca/shared/profiles/ca/caSignedLogCert.cfg b/base/ca/shared/profiles/ca/caSignedLogCert.cfg
+index ddd3d1a..01e21f1 100644
+--- a/base/ca/shared/profiles/ca/caSignedLogCert.cfg
++++ b/base/ca/shared/profiles/ca/caSignedLogCert.cfg
+@@ -1,6 +1,6 @@
+ desc=This profile is for enrolling audit log signing certificates
+-visible=true
+-enable=true
++visible=false
++enable=false
+ enableBy=admin
+ auth.class_id=
+ name=Manual Audit Log Signing Certificate Enrollment
+diff --git a/base/ca/shared/profiles/ca/caStorageCert.cfg b/base/ca/shared/profiles/ca/caStorageCert.cfg
+index abb9715..0791b79 100644
+--- a/base/ca/shared/profiles/ca/caStorageCert.cfg
++++ b/base/ca/shared/profiles/ca/caStorageCert.cfg
+@@ -73,7 +73,7 @@ policyset.drmStorageCertSet.6.default.params.keyUsageEncipherOnly=false
+ policyset.drmStorageCertSet.6.default.params.keyUsageDecipherOnly=false
+ policyset.drmStorageCertSet.9.constraint.class_id=signingAlgConstraintImpl
+ policyset.drmStorageCertSet.9.constraint.name=No Constraint
+-policyset.drmStorageCertSet.9.constraint.params.signingAlgsAllowed=SHA1withRSA,SHA256withRSA,SHA512withRSA,SHA1withDSA,SHA1withEC,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.drmStorageCertSet.9.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
+ policyset.drmStorageCertSet.9.default.class_id=signingAlgDefaultImpl
+ policyset.drmStorageCertSet.9.default.name=Signing Alg
+ policyset.drmStorageCertSet.9.default.params.signingAlg=-
+diff --git a/base/ca/shared/profiles/ca/caTransportCert.cfg b/base/ca/shared/profiles/ca/caTransportCert.cfg
+index 51dc084..f6ae711 100644
+--- a/base/ca/shared/profiles/ca/caTransportCert.cfg
++++ b/base/ca/shared/profiles/ca/caTransportCert.cfg
+@@ -79,7 +79,7 @@ policyset.transportCertSet.7.default.params.exKeyUsageCritical=false
+ policyset.transportCertSet.7.default.params.exKeyUsageOIDs=1.3.6.1.5.5.7.3.2
+ policyset.transportCertSet.8.constraint.class_id=signingAlgConstraintImpl
+ policyset.transportCertSet.8.constraint.name=No Constraint
+-policyset.transportCertSet.8.constraint.params.signingAlgsAllowed=SHA1withRSA,SHA256withRSA,SHA512withRSA,MD5withRSA,MD2withRSA,SHA1withDSA,SHA1withEC,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
++policyset.transportCertSet.8.constraint.params.signingAlgsAllowed=SHA256withRSA,SHA512withRSA,MD5withRSA,MD2withRSA,SHA256withEC,SHA384withRSA,SHA384withEC,SHA512withEC,SHA256withRSA/PSS,SHA384withRSA/PSS,SHA512withRSA/PSS
+ policyset.transportCertSet.8.default.class_id=signingAlgDefaultImpl
+ policyset.transportCertSet.8.default.name=Signing Alg
+ policyset.transportCertSet.8.default.params.signingAlg=-
+diff --git a/base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert b/base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert
+new file mode 100644
+index 0000000..02b8477
+--- /dev/null
++++ b/base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert
+@@ -0,0 +1,52 @@
++# Authors:
++#     Christina Fu <cfu@redhat.com>
++#
++# Copyright Red Hat, Inc.
++#
++# SPDX-License-Identifier: GPL-2.0-or-later
++
++from __future__ import absolute_import
++import logging
++import os
++import shutil
++
++import pki
++
++logger = logging.getLogger(__name__)
++
++
++class AddProfileCaAuditSigningCert(pki.server.upgrade.PKIServerUpgradeScriptlet):
++
++    def __init__(self):
++        super(AddProfileCaAuditSigningCert, self).__init__()
++        self.message = 'Add caAuditSigningCert profile'
++
++    def upgrade_subsystem(self, instance, subsystem):
++
++        if subsystem.name != 'ca':
++            return
++
++        path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caAuditSigningCert.cfg')
++
++        if not os.path.exists(path):
++            logger.info('Creating caAuditSigningCert.cfg')
++            self.backup(path)
++            shutil.copyfile('/usr/share/pki/ca/profiles/ca/caAuditSigningCert.cfg', path)
++            os.chown(path, instance.uid, instance.gid)
++            os.chmod(path, 0o0660)
++
++        logger.info('Adding caAuditSigningCert into profile.list')
++        profile_list = subsystem.config.get('profile.list').split(',')
++        if 'caAuditSigningCert' not in profile_list:
++            profile_list.append('caAuditSigningCert')
++            profile_list.sort()
++            subsystem.config['profile.list'] = ','.join(profile_list)
++
++        logger.info('Adding profile.caAuditSigningCert.class_id')
++        subsystem.config['profile.caAuditSigningCert.class_id'] = 'caEnrollImpl'
++
++        logger.info('Adding profile.caAuditSigningCert.config')
++        subsystem.config['profile.caAuditSigningCert.config'] = path
++
++        self.backup(subsystem.cs_conf)
++        subsystem.save()
+-- 
+1.8.3.1
+
+
+From 77eadead2fea96d897f3f09894ce612b9e1ee19d Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 16 Sep 2020 18:47:33 -0400
+Subject: [PATCH 5/6] Bug1858867-TPS does not check token cuid on the user
+ externalReg record during PIN reset
+
+  RHCS-MAINT contribution
+  This patch makes sure that if "tokenCUID" exists for the user reg record,
+  pinReset operation would make sure that it mathes with the current
+  token cuid;
+  If the "tokenCUID" does not exist in the user registration record
+  then any token can be used for pinReset;
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1858867
+
+(cherry picked from commit 1f24b6f0b9d37139b2069564ee6b2f5fe2bae527)
+---
+ .../server/tps/processor/TPSPinResetProcessor.java | 26 ++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+index 7d3a7cd..af42689 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+@@ -187,6 +187,32 @@ public class TPSPinResetProcessor extends TPSProcessor {
+             } else {
+                 CMS.debug(method + " --> registrationtype attribute disabled or not found, continuing.");
+             }
++            
++            /*
++             * If cuid is provided on the user registration record, then
++             * we have to compare that with the current token cuid;
++             *
++             * If, the cuid is not provided on the user registration record,
++             * then any token can be used.
++             */
++            if (erAttrs.getTokenCUID() != null) {
++                CMS.debug(method + " checking if token cuid matches record cuid");
++                CMS.debug(method + " erAttrs.getTokenCUID()=" + erAttrs.getTokenCUID());
++                CMS.debug(method + " tokenRecord.getId()=" + tokenRecord.getId());
++                if (!tokenRecord.getId().equalsIgnoreCase(erAttrs.getTokenCUID())) {
++                    logMsg = "isExternalReg: token CUID not matching record:" + tokenRecord.getId() + " : " +
++                            erAttrs.getTokenCUID();
++                    CMS.debug(method + logMsg);
++                    tps.tdb.tdbActivity(ActivityDatabase.OP_PIN_RESET, tokenRecord, session.getIpAddress(), logMsg,
++                            "failure");
++                    throw new TPSException(logMsg, TPSStatus.STATUS_ERROR_NOT_TOKEN_OWNER);
++                } else {
++                    logMsg = "isExternalReg: token CUID matches record";
++                    CMS.debug(method + logMsg);
++                }
++            } else {
++                CMS.debug(method + " no need to check if token cuid matches record");
++            }
+ 
+             session.setExternalRegAttrs(erAttrs);
+             setExternalRegSelectedTokenType(erAttrs);
+-- 
+1.8.3.1
+
+
+From 8c17891db620896e684cf0efd4ead66d8b1b4e1d Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Mon, 19 Oct 2020 21:26:43 -0400
+Subject: [PATCH 6/6] Enhancment to Bug 1858860 - TPS - Update Error Codes
+ returned to client (CIW/ESC) to Match CS8. (#3360)
+
+This enhancement allows config values to be used to test the unlikely error conditions addressed in the original bug:
+
+    To test one two scenarios, use these settings one at a time:
+
+    op.pinReset.testNoBeginMsg=false
+    op.pinReset.testUpdateDBFailure=false
+
+    The first one will test the error code returned when the beginOp message is missing when atempting
+    a pin Reset operation. The error returned should be error "4".
+
+    The second one will test if the update of the db for the token does not complete properly.
+
+    The error returned in this scenario should be "41".
+
+    The tpsclient utility can be used to test these two scenarios. Once again try them separately
+    because the first error will stop the pin reset procedure before the second scenario can even happen.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit 509d31cf80e13c564b50d41feb11fd9c2eb9db73)
+---
+ .../server/tps/processor/TPSPinResetProcessor.java | 29 +++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+index af42689..805af20 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
++++ b/base/tps/src/org/dogtagpki/server/tps/processor/TPSPinResetProcessor.java
+@@ -49,7 +49,19 @@ public class TPSPinResetProcessor extends TPSProcessor {
+ 
+     @Override
+     public void process(BeginOpMsg beginMsg) throws TPSException, IOException {
+-        if (beginMsg == null) {
++
++        IConfigStore configStore = CMS.getConfigStore();
++
++        // Use this only for testing, not for normal operation.
++        String configName = "op.pinReset.testNoBeginMsg";
++        boolean testPinResetNoBeginMsg = false;
++        try {
++            testPinResetNoBeginMsg = configStore.getBoolean(configName,false);
++        } catch (EBaseException e) {
++            testPinResetNoBeginMsg = false;
++        }
++
++        if (beginMsg == null || testPinResetNoBeginMsg == true) {
+             throw new TPSException("TPSPinResetProcessor.process: invalid input data, no beginMsg provided.",
+                     TPSStatus.STATUS_ERROR_MAC_RESET_PIN_PDU);
+         }
+@@ -324,7 +336,22 @@ public class TPSPinResetProcessor extends TPSProcessor {
+ 
+         statusUpdate(100, "PROGRESS_PIN_RESET_COMPLETE");
+         logMsg = "update token during pin reset";
++
++        IConfigStore configStore = CMS.getConfigStore();
++
++        // Use this only for testing, not for normal operation.
++        String configName = "op.pinReset.testUpdateDBFailure";
++        boolean testUpdateDBFailure = false;
+         try {
++            testUpdateDBFailure = configStore.getBoolean(configName,false);
++        } catch (EBaseException e) {
++            testUpdateDBFailure = false;
++        }
++
++        try {
++            if(testUpdateDBFailure == true) {
++                throw new Exception("Test failure to update DB for Pin Reset!");
++            }
+             tps.tdb.tdbUpdateTokenEntry(tokenRecord);
+             tps.tdb.tdbActivity(ActivityDatabase.OP_PIN_RESET, tokenRecord, session.getIpAddress(), logMsg, "success");
+             CMS.debug(method + ": token record updated!");
+-- 
+1.8.3.1
+

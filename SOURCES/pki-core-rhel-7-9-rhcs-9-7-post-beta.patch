@@ -1,0 +1,530 @@
+From cc6d37299e5f1158c7a579c963b1ecf350948d9e Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Fri, 24 Apr 2020 15:18:29 -0700
+Subject: [PATCH 1/2] My 10.5 (#389)
+
+* Add AlgorithmId.toStringWithParams, fix toString
+
+    PKI's usage of AlgorithmId.toString() doesn't handle having the
+    parameters encoded in the toString() representation of the id.
+    Move toString() back to only having the contents of algName, and
+    move parameters to a separate method.
+
+    Fix courtesy ascheel.
+
+* Apply contributed patch  - TPS - Searching the certificate DB for a brand new token takes too long. Bad search filter
+
+Resolves:
+Bug #1710975 - TPS - Searching the certificate DB for a band new token takes too long. Bad search filter.
+Submited by RHCS-maint.
+
+Co-authored-by: Jack Magne <jmagne@test.host.com>
+(cherry picked from commit c02de65c98232a848bbeed67c872fd57f51a49fe)
+---
+ .../tps/src/org/dogtagpki/server/tps/TPSTokendb.java | 14 ++++++++++----
+ .../util/src/netscape/security/x509/AlgorithmId.java | 20 +++++++++++++++++---
+ 2 files changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+index 49bfb7f..446fa3f 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+@@ -370,7 +370,10 @@ public class TPSTokendb {
+     private boolean isCertOnToken(TPSCertRecord cert, String cuid) {
+         String method = "TPSTokendb: isCertOnToken: ";
+         boolean result = false;
+-        String filter = cuid;
++
++        Map<String, String> attributes = new HashMap<String, String>();
++        attributes.put("tokenID", cuid);
++
+         Iterator<TPSCertRecord> records;
+         if (cert == null) {
+             CMS.debug(method + "input param cert null");
+@@ -385,7 +388,7 @@ public class TPSTokendb {
+                 "cert serial = " + cert.getSerialNumber() +
+                 "; token cuid = " + cuid);
+         try {
+-            records = tps.certDatabase.findRecords(filter).iterator();
++            records = tps.certDatabase.findRecords(null, attributes).iterator();
+         } catch (Exception e) {
+             CMS.debug(method + ":" + e);
+             return false;
+@@ -430,10 +433,13 @@ public class TPSTokendb {
+             throw new Exception(method + ": cuid null");
+ 
+         CMS.debug(method + ":" + " begins for cuid =" + cuid);
+-        String filter = cuid;
++
++        Map<String, String> attributes = new HashMap<String, String>();
++        attributes.put("tokenID", cuid);
++
+         Iterator<TPSCertRecord> records;
+         try {
+-            records = tps.certDatabase.findRecords(filter).iterator();
++            records = tps.certDatabase.findRecords(null, attributes).iterator();
+         } catch (Exception e) {
+             CMS.debug(method + ":" + e);
+             throw new Exception(method + ":" + e);
+diff --git a/base/util/src/netscape/security/x509/AlgorithmId.java b/base/util/src/netscape/security/x509/AlgorithmId.java
+index 6ce30e9..a5e4906 100644
+--- a/base/util/src/netscape/security/x509/AlgorithmId.java
++++ b/base/util/src/netscape/security/x509/AlgorithmId.java
+@@ -624,10 +624,24 @@ public class AlgorithmId implements Serializable, DerEncoder {
+     }
+ 
+     /**
+-     * Returns a string describing the algorithm and its parameters.
++     * Returns a string describing only the algorithm without parameters.
++     *
++     * Use toStringWithParams() for algorithm name and paramaters, or
++     * paramsToString() for just parameters.
+      */
+     public String toString() {
+-        return (algName() + " " + paramsToString());
++        return algName();
++    }
++
++    /**
++     * Returns a string describing the algorithm and its parameters.
++     */
++    public String toStringWithParams() {
++        if (params == null) {
++            return algName();
++        }
++
++        return algName() + " " + paramsToString();
+     }
+ 
+     /**
+@@ -1030,7 +1044,7 @@ public class AlgorithmId implements Serializable, DerEncoder {
+      */
+     public static final String[] ALL_SIGNING_ALGORITHMS = new String[]
+     {
+-            "SHA256withRSA", "SHA384withRSA", "SHA512withRSA", "SHA1withRSA","SHA256withRSA/PSS","SHA384withRSA/PSS","SHA5121withRSA/PSS",
++            "SHA256withRSA", "SHA384withRSA", "SHA512withRSA", "SHA1withRSA","SHA256withRSA/PSS","SHA384withRSA/PSS","SHA512withRSA/PSS",
+             "SHA256withEC", "SHA384withEC", "SHA512withEC", "SHA1withEC" };
+ 
+     public static void dumpBytes(byte[] data)
+-- 
+1.8.3.1
+
+
+From 5cfb515d0ab1a32a1dafa1c12088e52c21569bd8 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Mon, 4 May 2020 09:43:30 -0700
+Subject: [PATCH 2/2] Bug 1794213 Additional Server-Side Kyegen Enrollment
+ support and touch-up
+
+This patch
+  - adds support for automatic approval (e.g. UidPwdDirAuth)
+  - adds support for the "enableArchival" parameter for ServerKeygenUserKeyDefault per profile
+  - fixes the accidental disablement of DSA key generation in AsymKeyGenService.java
+  - Clears some of the unneeded items in the request
+  - zeroize password in memory
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1794213
+(cherry picked from commit 9ab687e9a5104b260c958e59b3ca87e753b2fd73)
+---
+ .../shared/profiles/ca/caServerKeygen_UserCert.cfg |  1 +
+ .../src/com/netscape/certsrv/request/IRequest.java |  1 +
+ .../src/com/netscape/kra/AsymKeyGenService.java    |  6 ++--
+ base/kra/src/com/netscape/kra/RecoveryService.java | 30 +++++++++++++++---
+ .../cms/profile/common/CAEnrollProfile.java        | 28 ++++++++++++++++
+ .../profile/def/ServerKeygenUserKeyDefault.java    | 25 ++++++++++++---
+ .../cms/servlet/connector/ConnectorServlet.java    | 14 --------
+ .../cms/servlet/profile/ProfileProcessServlet.java |  8 ++---
+ .../cms/servlet/profile/ProfileSubmitServlet.java  | 37 +++++++++++++++++++++-
+ base/server/cmsbundle/src/UserMessages.properties  |  6 ++--
+ 10 files changed, 123 insertions(+), 33 deletions(-)
+
+diff --git a/base/ca/shared/profiles/ca/caServerKeygen_UserCert.cfg b/base/ca/shared/profiles/ca/caServerKeygen_UserCert.cfg
+index b449163..b8c3e10 100644
+--- a/base/ca/shared/profiles/ca/caServerKeygen_UserCert.cfg
++++ b/base/ca/shared/profiles/ca/caServerKeygen_UserCert.cfg
+@@ -42,6 +42,7 @@ policyset.userCertSet.3.default.class_id=serverKeygenUserKeyDefaultImpl
+ policyset.userCertSet.3.default.name=Server-Side Keygen Default
+ policyset.userCertSet.3.default.params.keyType=RSA
+ policyset.userCertSet.3.default.params.keySize=2048
++policyset.userCertSet.3.default.params.enableArchival=true
+ policyset.userCertSet.4.constraint.class_id=noConstraintImpl
+ policyset.userCertSet.4.constraint.name=No Constraint
+ policyset.userCertSet.4.default.class_id=authorityKeyIdentifierExtDefaultImpl
+diff --git a/base/common/src/com/netscape/certsrv/request/IRequest.java b/base/common/src/com/netscape/certsrv/request/IRequest.java
+index 47dde82..7193791 100644
+--- a/base/common/src/com/netscape/certsrv/request/IRequest.java
++++ b/base/common/src/com/netscape/certsrv/request/IRequest.java
+@@ -199,6 +199,7 @@ public interface IRequest extends Serializable {
+ 
+     // Server-side Keygen enrollment
+     //public static final String SERVER_SIDE_KEYGEN_ENROLL = "serverSideKeygenEnroll";
++    public static final String SERVER_SIDE_KEYGEN_ENROLL_ENABLE_ARCHIVAL = "serverSideKeygenEnrollEnableArchival";
+     public static final String SSK_STAGE = "serverSideKeygenStage";
+     public static final String SSK_STAGE_KEYGEN = "serverSideKeygenStage_keygen";
+     public static final String SSK_STAGE_KEY_RETRIEVE = "serverSideKeygenStage_key_retrieve";
+diff --git a/base/kra/src/com/netscape/kra/AsymKeyGenService.java b/base/kra/src/com/netscape/kra/AsymKeyGenService.java
+index 61f86ff..0aa0862 100644
+--- a/base/kra/src/com/netscape/kra/AsymKeyGenService.java
++++ b/base/kra/src/com/netscape/kra/AsymKeyGenService.java
+@@ -102,9 +102,7 @@ public class AsymKeyGenService implements IService {
+         boolean isEC = false;
+         String errmsg ="";
+ 
+-        if (algorithm.toUpperCase().equals("RSA"))
+-            keySize = Integer.valueOf(keySizeStr);
+-        else {
++        if (algorithm.toUpperCase().equals("EC")) {
+             isEC = true;
+             switch (keySizeStr) {
+                case "nistp256":
+@@ -127,6 +125,8 @@ public class AsymKeyGenService implements IService {
+                         errmsg));
+                     throw new EBaseException("Errors in ServerSideKeygenEnroll generating Asymmetric key: " + errmsg);
+             }
++        } else {
++            keySize = Integer.valueOf(keySizeStr);
+         }
+ 
+         String realm = request.getRealm();
+diff --git a/base/kra/src/com/netscape/kra/RecoveryService.java b/base/kra/src/com/netscape/kra/RecoveryService.java
+index fc6edeb..c5229ea 100644
+--- a/base/kra/src/com/netscape/kra/RecoveryService.java
++++ b/base/kra/src/com/netscape/kra/RecoveryService.java
+@@ -168,7 +168,6 @@ public class RecoveryService implements IService {
+                 isSSKeygen = true;
+                 CryptoToken token = CryptoUtil.getKeyStorageToken("internal");
+ 
+-                // serverKeygenP12Pass = request.getExtDataInString("serverSideKeygenP12Passwd");
+                 byte[] sessionWrappedPassphrase = (byte[]) request.getExtDataInByteArray("serverSideKeygenP12PasswdEnc");
+                 if (sessionWrappedPassphrase == null) {
+                     throw new EBaseException(CMS.getUserMessage("CMS_BASE_CERT_ERROR" + "Server-Side Keygen Enroll Key Retrieval: sessionWrappedPassphrase not found in Request"));
+@@ -210,16 +209,21 @@ public class RecoveryService implements IService {
+                         ivps, sessionWrappedPassphrase, unwrappedSessionKey,
+                         encryptAlgorithm);
+                 serverKeygenP12Pass = new String(passphrase, "UTF-8");
+-                // TODO: do this after it's done being used later:
+-                // CryptoUtil.obscureBytes(serverKeygenP12Pass, "random");
++                CryptoUtil.obscureBytes(passphrase, "random");
+             }
+         } catch (Exception e) {
+             CMS.debug("RecoveryService exception: use internal token :"
+                     + e.toString());
+             ct = cm.getInternalCryptoToken();
++        } finally {
++            // delete SSK items from request
++            request.setExtData("serverSideKeygenP12PasswdTransSession", "");
++            request.setExtData("serverSideKeygenP12PasswdEnc", "");
++            request.deleteExtData("serverSideKeygenP12PasswdTransSession");
++            request.deleteExtData("serverSideKeygenP12PasswdEnc");
+         }
+         if (ct == null) {
+-            throw new EBaseException(CMS.getUserMessage("CMS_BASE_CERT_ERROR" + "cannot get crypto token"));
++            throw new EBaseException(CMS.getUserMessage("CMS_BASE_TOKEN_NOT_FOUND" + "cannot get crypto token"));
+         }
+ 
+         IStatsSubsystem statsSub = (IStatsSubsystem) CMS.getSubsystem("stats");
+@@ -349,6 +353,7 @@ public class RecoveryService implements IService {
+                 //We don't need this data any more
+                 JssSubsystem jssSubsystem = (JssSubsystem) CMS.getSubsystem(JssSubsystem.ID);
+                 jssSubsystem.obscureBytes(privateKeyData);
++
+             }
+ 
+             if (statsSub != null) {
+@@ -384,13 +389,28 @@ public class RecoveryService implements IService {
+             }
+         }
+ 
+-        // cfu
+         if (isSSKeygen) {
+             CMS.debug("RecoveryService: putting p12 in request");
+             byte[] p12b = (byte[])params.get(ATTR_PKCS12);
+             // IEnrollProfile.REQUEST_ISSUED_P12
+             request.setExtData("req_issued_p12" /*ATTR_PKCS12*/, p12b);
++
++            // if key archival is not enabled, delete the key record.
++            // for Server-Side keygen enrollment, key archival is determined
++            // by the enableArchival parameter in the enrollment profiile:
++            // e.g.
++            //     policyset.userCertSet.3.default.params.enableArchival
++            // Note that if the enableArchival parameter does not exist in
++            // the profile, the default value to that is set to *false*
++            // in the request in ServerKeygenUserKeyDefault
++            boolean isArchival = request.getExtDataInBoolean(IRequest.SERVER_SIDE_KEYGEN_ENROLL_ENABLE_ARCHIVAL, true);
++            if (isArchival) {
++                CMS.debug("RecoveryService: serviceRequest: Server-Side Keygen isArchival true, key record kept");
++            } else
++                mStorage.deleteKeyRecord(serialno);   
++                CMS.debug("RecoveryService: serviceRequest: Server-Side Keygen isArchival false, key record not kept");
+         }
++ 
+         mKRA.log(ILogger.LL_INFO, "key " +
+                 serialno.toString() +
+                 " recovered");
+diff --git a/base/server/cms/src/com/netscape/cms/profile/common/CAEnrollProfile.java b/base/server/cms/src/com/netscape/cms/profile/common/CAEnrollProfile.java
+index 138a2ec..f8b547d 100644
+--- a/base/server/cms/src/com/netscape/cms/profile/common/CAEnrollProfile.java
++++ b/base/server/cms/src/com/netscape/cms/profile/common/CAEnrollProfile.java
+@@ -131,8 +131,25 @@ public class CAEnrollProfile extends EnrollProfile {
+         // if PKI Archive Option present, send this request
+         // to DRM
+         byte optionsData[] = request.getExtDataInByteArray(REQUEST_ARCHIVE_OPTIONS);
++        byte[] transWrappedSessionKey = null;
++        byte[] sessionWrappedPassphrase = null;
+         if (isSSKeygen) { // Server-Side Keygen enrollment
+             request.setExtData(IRequest.SSK_STAGE, IRequest.SSK_STAGE_KEYGEN);
++
++            /*
++             * temporarily remove the items not needed for SSK_STAGE_KEYGEN
++             * so not to pass them to KRA.
++             * They will be put back at SSK_STAGE_KEY_RETRIEVE below
++             */
++            transWrappedSessionKey = (byte[]) request.getExtDataInByteArray("serverSideKeygenP12PasswdTransSession");
++
++            sessionWrappedPassphrase = (byte[]) request.getExtDataInByteArray("serverSideKeygenP12PasswdEnc");
++
++            request.setExtData("serverSideKeygenP12PasswdTransSession", "");
++            request.deleteExtData("serverSideKeygenP12PasswdTransSession");
++            request.setExtData("serverSideKeygenP12PasswdEnc", "");
++            request.deleteExtData("serverSideKeygenP12PasswdEnc");
++
+             try {
+                 IConnector kraConnector = caService.getKRAConnector();
+ 
+@@ -326,6 +343,11 @@ public class CAEnrollProfile extends EnrollProfile {
+             request.setExtData(IRequest.REQ_STATUS, "begin");
+             request.setExtData("requestType", "recovery");
+             request.setExtData("cert", theCert); //recognized by kra
++
++            // putting them back
++            request.setExtData("serverSideKeygenP12PasswdEnc", sessionWrappedPassphrase);
++            request.setExtData("serverSideKeygenP12PasswdTransSession", transWrappedSessionKey);
++
+             try {
+                 IConnector kraConnector = caService.getKRAConnector();
+ 
+@@ -376,6 +398,12 @@ public class CAEnrollProfile extends EnrollProfile {
+                     throw (ERejectException) e;
+                 }
+                 throw new EProfileException(e);
++            } finally {
++                // cfu TODO: clean them 
++                    request.setExtData("serverSideKeygenP12PasswdTransSession", "");
++                    request.deleteExtData("serverSideKeygenP12PasswdTransSession");
++                    request.setExtData("serverSideKeygenP12PasswdEnc", "");
++                    request.deleteExtData("serverSideKeygenP12PasswdEnc");
+             }
+             CMS.debug(method + "isSSKeygen: response received from KRA");
+         }
+diff --git a/base/server/cms/src/com/netscape/cms/profile/def/ServerKeygenUserKeyDefault.java b/base/server/cms/src/com/netscape/cms/profile/def/ServerKeygenUserKeyDefault.java
+index 1e2a787..b1eb58e 100644
+--- a/base/server/cms/src/com/netscape/cms/profile/def/ServerKeygenUserKeyDefault.java
++++ b/base/server/cms/src/com/netscape/cms/profile/def/ServerKeygenUserKeyDefault.java
+@@ -68,6 +68,7 @@ import com.netscape.certsrv.logging.ILogger;
+  */
+ public class ServerKeygenUserKeyDefault extends EnrollDefault {
+ 
++    public static final String CONFIG_ENABLE_ARCHIVAL = "enableArchival";
+     public static final String CONFIG_LEN = "keySize";
+     public static final String CONFIG_TYPE = "keyType";
+     public static final String VAL_LEN = "LEN";
+@@ -84,6 +85,7 @@ public class ServerKeygenUserKeyDefault extends EnrollDefault {
+ 
+     public ServerKeygenUserKeyDefault() {
+         super();
++        addConfigName(CONFIG_ENABLE_ARCHIVAL);
+         addConfigName(CONFIG_TYPE);
+         addConfigName(CONFIG_LEN);
+         addValueName(VAL_TYPE);
+@@ -103,18 +105,23 @@ public class ServerKeygenUserKeyDefault extends EnrollDefault {
+ */
+ 
+     public IDescriptor getConfigDescriptor(Locale locale, String name) {
+-        if (name.equals(CONFIG_TYPE)) {
++        if (name.equals(CONFIG_ENABLE_ARCHIVAL)) {
++            return new Descriptor(IDescriptor.BOOLEAN, null,
++                    "false",
++                    CMS.getUserMessage(locale,
++                    "CMS_PROFILE_SERVER_SIDE_KEYGEN_ENABLE_ARCHIVAL"));
++        } else if (name.equals(CONFIG_TYPE)) {
+             return new Descriptor(IDescriptor.STRING,
+                     null,
+                     "RSA",
+                     CMS.getUserMessage(locale,
+-                            "CMS_PROFILE_SERVER_KEYGEN_KEYTYPE"));
++                            "CMS_PROFILE_SERVER_SIDE_KEYGEN_KEYTYPE"));
+         } else if (name.equals(CONFIG_LEN)) {
+             return new Descriptor(IDescriptor.STRING,
+                     null,
+                     "2048",
+                     CMS.getUserMessage(locale,
+-                            "CMS_PROFILE_SERVER_KEYGEN_KEYSIZE"));
++                            "CMS_PROFILE_SERVER_SIDE_KEYGEN_KEYSIZE"));
+         } else  {
+             return null;
+         }
+@@ -343,11 +350,14 @@ public class ServerKeygenUserKeyDefault extends EnrollDefault {
+                 // store in request to pass to kra
+                 request.setExtData(IRequest.SECURITY_DATA_CLIENT_KEY_ID,
+                         subj);
++
+                 request.setExtData("serverSideKeygenP12PasswdEnc",
+                         sessionWrappedPassphrase);
+                 request.setExtData("serverSideKeygenP12PasswdTransSession",
+                         transWrappedSessionKey);
+-                // delete the plain text one
++
++                // delete
++                request.setExtData("serverSideKeygenP12Passwd", "");
+                 request.deleteExtData("serverSideKeygenP12Passwd");
+             }
+ 
+@@ -455,6 +465,13 @@ public class ServerKeygenUserKeyDefault extends EnrollDefault {
+             } else {
+                 CMS.debug("ServerKeygenUserKeyDefault: populate: serverKeygen to be implemented ");
+             }
++
++            // the param "enableArchival" allows the profile to decide whether
++            // to archive the keys or not; By default, it is *false*
++            boolean enableArchival = getConfigBoolean(CONFIG_ENABLE_ARCHIVAL);
++            //CMS.debug(method + "archival enabled: " + enableArchival);
++            request.setExtData(IRequest.SERVER_SIDE_KEYGEN_ENROLL_ENABLE_ARCHIVAL, enableArchival? "true":"false");
++
+             info.set(X509CertInfo.KEY, certKey);
+         } catch (Exception e) {
+             CMS.debug("ServerKeygenUserKeyDefault: populate " + e.toString());
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/connector/ConnectorServlet.java b/base/server/cms/src/com/netscape/cms/servlet/connector/ConnectorServlet.java
+index 5d39f24..fb9ed65 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/connector/ConnectorServlet.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/connector/ConnectorServlet.java
+@@ -554,20 +554,6 @@ public class ConnectorServlet extends CMSServlet {
+             thisreq.setExtData("dbStatus", "NOT_UPDATED");
+             thisreq.setExtData(IRequest.REQ_STATUS, "begin");
+ 
+-            /* cfu: let's find out what's in the request again
+-            CMS.debug("ConnectorServlet: cfu see again what's in request");
+-            ereq = thisreq.getExtDataKeys();
+-            while (ereq.hasMoreElements()) {
+-                String reqKey = ereq.nextElement();
+-                String reqVal = thisreq.getExtDataInString(reqKey);
+-                if (reqVal != null) {
+-                    CMS.debug("ConnectorServlet: - " + reqKey + ": " + reqVal);
+-                } else {
+-                    CMS.debug("ConnectorServlet: - " + reqKey + ": no value");
+-                }
+-            }
+-            */
+-
+             boolean isSSKeygen = false;
+             String isSSKeygenStr = thisreq.getExtDataInString("isServerSideKeygen");
+             if ((isSSKeygenStr != null) && isSSKeygenStr.equalsIgnoreCase("true")) {
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileProcessServlet.java b/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileProcessServlet.java
+index 3bc1853..3c1c439 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileProcessServlet.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileProcessServlet.java
+@@ -174,16 +174,16 @@ public class ProfileProcessServlet extends ProfileServlet {
+             args.set(ARG_OUTPUT_LIST, outputlist);
+         }
+ 
+-        try { //cfu
+-            CMS.debug("ProfileProcessServlet:cfu: p12 output process begins");
++        try {
++            //CMS.debug("ProfileProcessServlet: p12 output process begins");
+             String p12Str = req.getExtDataInString("req_issued_p12");
+             if (p12Str == null) {
+                 // not server-side keygen
+-                // CMS.debug("ProfileProcessServlet:cfu: no p12; not server-side keygen");
++                // CMS.debug("ProfileProcessServlet: no p12; not server-side keygen");
+                 outputTemplate(request, response, args);
+             } else {
+                 // found pkcs12 blob
+-                CMS.debug("ProfileProcessServlet: found p12 " /* + p12Str*/);
++                //CMS.debug("ProfileProcessServlet: found p12 " /* + p12Str*/);
+                 byte[] p12blob = null;
+                 HttpServletResponse p12_response = cmsReq.getHttpResp();
+                 p12blob = Utils.base64decode(p12Str);
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileSubmitServlet.java b/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileSubmitServlet.java
+index b18e407..ec13aa2 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileSubmitServlet.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/profile/ProfileSubmitServlet.java
+@@ -20,6 +20,8 @@ package com.netscape.cms.servlet.profile;
+ import java.util.Enumeration;
+ import java.util.HashMap;
+ import java.util.Locale;
++import java.io.IOException;
++import java.io.OutputStream;
+ 
+ import javax.servlet.ServletConfig;
+ import javax.servlet.ServletException;
+@@ -202,10 +204,43 @@ public class ProfileSubmitServlet extends ProfileServlet {
+             args.set(ARG_ERROR_CODE, "0");
+             args.set(ARG_ERROR_REASON, "");
+ 
+-            outputTemplate(request, response, args);
++            //outputTemplate(request, response, args);
++            try {
++                //CMS.debug("ProfileSubmitServlet: p12 output process begins");
++                String p12Str = reqs[0].getExtDataInString("req_issued_p12");
++                if (p12Str == null) {
++                    // not server-side keygen
++                    // CMS.debug("ProfileProcessServlet:cfu: no p12; not server-side keygen");
++                    outputTemplate(request, response, args);
++                } else {
++                    // found pkcs12 blob
++                    //CMS.debug("ProfileProcessServlet: found p12 " /* + p12Str*/);
++                    byte[] p12blob = null;
++                    HttpServletResponse p12_response = cmsReq.getHttpResp();
++                    p12blob = Utils.base64decode(p12Str);
++                    OutputStream bos = p12_response.getOutputStream();
++                    p12_response.setContentType("application/x-pkcs12");
++                    p12_response.setContentLength(p12blob.length);
++                    p12_response.setHeader("Content-disposition", "attachment; filename="+  "serverKeyGenCert.p12");
++                    bos.write(p12blob);
++                    bos.flush();
++                    bos.close();
++                }
++            } catch (IOException e) {
++                CMS.debug(e);
++                setError(args, e.getMessage(), request, response);
++                return;
++            }
+         }
+     }
+ 
++    private void setError(ArgSet args, String reason, HttpServletRequest request, HttpServletResponse response)
++            throws EBaseException {
++        args.set(ARG_ERROR_CODE, "1");
++        args.set(ARG_ERROR_REASON, reason);
++        outputTemplate(request, response, args);
++    }
++
+     public HashMap<String, Object> processEnrollment(CMSRequest cmsReq) throws EBaseException {
+ 
+         HttpServletRequest request = cmsReq.getHttpReq();
+diff --git a/base/server/cmsbundle/src/UserMessages.properties b/base/server/cmsbundle/src/UserMessages.properties
+index 2c57c59..78687a6 100644
+--- a/base/server/cmsbundle/src/UserMessages.properties
++++ b/base/server/cmsbundle/src/UserMessages.properties
+@@ -844,8 +844,9 @@ CMS_PROFILE_VALIDITY_NOT_BEFORE_GRACE_PERIOD=Grace period for Not Before being s
+ CMS_PROFILE_VALIDITY_RANGE=Validity Range
+ CMS_PROFILE_VALIDITY_RANGE_UNIT=Validity Range Unit: year, month, day (default), hour, minute
+ CMS_PROFILE_VALIDITY_START_TIME=Relative Start Time (in seconds)
+-CMS_PROFILE_SERVER_KEYGEN_KEYTYPE=Server-side keygen key type
+-CMS_PROFILE_SERVER_KEYGEN_KEYSIZE=Server-side keygen key size
++CMS_PROFILE_SERVER_SIDE_KEYGEN_KEYTYPE=Server-side keygen key type: RSA or EC
++CMS_PROFILE_SERVER_SIDE_KEYGEN_KEYSIZE=Server-side keygen key size. For RSA: 1024,2048,3072,or 4096; for EC: nistp256,nistp384,or nistp521
++CMS_PROFILE_SERVER_SIDE_KEYGEN_ENABLE_ARCHIVAL=Server-side keygen enable key archival
+ CMS_PROFILE_NOT_BEFORE_RANDOM_BITS=Not Before Random Bits
+ CMS_PROFILE_NOT_AFTER_RANDOM_BITS=Not After Random Bits
+ CMS_PROFILE_BYPASS_CA_NOTAFTER=Bypass CA notAfter constraint
+@@ -919,6 +920,7 @@ CMS_PROFILE_EXT_VALUE=Extension Value
+ CMS_PROFILE_KEY=Key
+ CMS_PROFILE_KEY_LEN=Key Length
+ CMS_PROFILE_KEY_TYPE=Key Type
++CMS_PROFILE_ENABLE_ARCHIVAL=Enable Archival
+ CMS_PROFILE_KEY_MIN_LEN=Min Key Length
+ CMS_PROFILE_KEY_MAX_LEN=Max Key Length
+ CMS_PROFILE_KEY_PARAMETERS=Key Lengths or Curves. For EC use comma separated list of curves, otherise use list of key sizes. Ex: 1024,2048,4096,8192 or: nistp256,nistp384,nistp521,sect163k1,nistk163 for EC.
+-- 
+1.8.3.1
+

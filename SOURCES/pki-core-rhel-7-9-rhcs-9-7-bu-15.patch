@@ -1,0 +1,128 @@
+From 1423cf8b1e7a79ed42632e6fc462b7671833a18b Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 12 Apr 2022 15:17:06 -0700
+Subject: [PATCH] Bug2074722-p12 password
+
+This patch comments out lines where auditContext is printed in debug
+log.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2074722
+---
+ base/server/cms/src/com/netscape/cms/servlet/base/CMSServlet.java     | 4 ++--
+ .../cms/src/com/netscape/cms/servlet/processors/CAProcessor.java      | 4 ++--
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/base/CMSServlet.java b/base/server/cms/src/com/netscape/cms/servlet/base/CMSServlet.java
+index 854d656..77296d9 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/base/CMSServlet.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/base/CMSServlet.java
+@@ -2031,7 +2031,7 @@ public abstract class CMSServlet extends HttpServlet {
+         // Initialize subjectID
+         SessionContext auditContext = SessionContext.getExistingContext();
+ 
+-        CMS.debug("CMSServlet: auditSubjectID auditContext " + auditContext);
++        //CMS.debug("CMSServlet: auditSubjectID auditContext " + auditContext);
+         if (auditContext != null) {
+             subjectID = (String)
+                     auditContext.get(SessionContext.USER_ID);
+@@ -2067,7 +2067,7 @@ public abstract class CMSServlet extends HttpServlet {
+         // Initialize groupID
+         SessionContext auditContext = SessionContext.getExistingContext();
+ 
+-        CMS.debug("CMSServlet: auditGroupID auditContext " + auditContext);
++        //CMS.debug("CMSServlet: auditGroupID auditContext " + auditContext);
+         if (auditContext != null) {
+             groupID = (String)
+                     auditContext.get(SessionContext.GROUP_ID);
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/processors/CAProcessor.java b/base/server/cms/src/com/netscape/cms/servlet/processors/CAProcessor.java
+index f732c4d..ebbc7ab 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/processors/CAProcessor.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/processors/CAProcessor.java
+@@ -892,7 +892,7 @@ public class CAProcessor extends Processor {
+         // Initialize subjectID
+         SessionContext auditContext = SessionContext.getExistingContext();
+ 
+-        CMS.debug("CMSServlet: auditSubjectID auditContext " + auditContext);
++        //CMS.debug("CMSServlet: auditSubjectID auditContext " + auditContext);
+         if (auditContext != null) {
+             subjectID = (String)
+                     auditContext.get(SessionContext.USER_ID);
+@@ -918,7 +918,7 @@ public class CAProcessor extends Processor {
+         // Initialize groupID
+         SessionContext auditContext = SessionContext.getExistingContext();
+ 
+-        CMS.debug("CMSServlet: auditGroupID auditContext " + auditContext);
++        //CMS.debug("CMSServlet: auditGroupID auditContext " + auditContext);
+         if (auditContext != null) {
+             groupID = (String)
+                     auditContext.get(SessionContext.GROUP_ID);
+-- 
+1.8.3.1
+
+From cb9c57d143680d142a3d1671fc8d6fff15b5773c Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 3 May 2022 15:33:44 -0700
+Subject: [PATCH 1/2] Bug2074740-p12-passwd-http-GET-params
+
+This patch handles the p12 passwd missed in GET
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2074740
+---
+ base/server/cmscore/src/com/netscape/cmscore/base/ArgBlock.java | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/base/server/cmscore/src/com/netscape/cmscore/base/ArgBlock.java b/base/server/cmscore/src/com/netscape/cmscore/base/ArgBlock.java
+index 46e021a..5913c94 100644
+--- a/base/server/cmscore/src/com/netscape/cmscore/base/ArgBlock.java
++++ b/base/server/cmscore/src/com/netscape/cmscore/base/ArgBlock.java
+@@ -145,7 +145,7 @@ public class ArgBlock implements IArgBlock {
+      */
+     public String getValueAsString(String n) throws EBaseException {
+         String t = (String) mArgs.get(n);
+-        CMS.traceHashKey(mType, n, t);
++        CMS.traceHashKey(mType, n, CMS.isSensitive(n)?": (sensitive)":t);
+ 
+         if (t != null) {
+             return t;
+@@ -163,7 +163,7 @@ public class ArgBlock implements IArgBlock {
+      */
+     public String getValueAsString(String n, String def) {
+         String val = (String) mArgs.get(n);
+-        CMS.traceHashKey(mType, n, val, def);
++        CMS.traceHashKey(mType, n, CMS.isSensitive(n)?": (sensitive)":val, def);
+ 
+         if (val != null) {
+             return val;
+-- 
+1.8.3.1
+
+
+From 39b291486876fda8049709f6e8018961b553a36b Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Fri, 6 May 2022 14:28:25 -0700
+Subject: [PATCH 2/2] Bug2082717 - SCEP manual approval failure
+
+This patch fixes the set id not found null pointer exception.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2082717
+---
+ .../cms/src/com/netscape/cms/servlet/cert/scep/CRSEnrollment.java      | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/cert/scep/CRSEnrollment.java b/base/server/cms/src/com/netscape/cms/servlet/cert/scep/CRSEnrollment.java
+index 690543c..ab7abb3 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/cert/scep/CRSEnrollment.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/cert/scep/CRSEnrollment.java
+@@ -1633,6 +1633,9 @@ public class CRSEnrollment extends HttpServlet {
+             reqs[0].setExtData("profileRemoteAddr", httpReq.getRemoteAddr());
+             reqs[0].setExtData("profileApprovedBy", profile.getApprovedBy());
+ 
++	    String setId = profile.getPolicySetId(reqs[0]);
++	    reqs[0].setExtData("profileSetId" /*CAProcessor.ARG_PROFILE_SET_ID*/, setId);
++
+             CMS.debug("CRSEnrollment: Populating inputs");
+             profile.populateInput(ctx, reqs[0]);
+             CMS.debug("CRSEnrollment: Populating requests");
+-- 
+1.8.3.1
+

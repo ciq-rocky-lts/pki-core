@@ -1,0 +1,320 @@
+From 14e4011027214bd2c33ef4975a3ed43486e4de70 Mon Sep 17 00:00:00 2001
+From: Matthew Harmsen <mharmsen@redhat.com>
+Date: Sat, 23 Oct 2021 23:19:57 -0600
+Subject: [PATCH 1/3] Fixes gleaned from the following DOGTAG_10_5_COMMITS:
+
+commit 68ef0c8a4208b9deea819c41d65639edd6de8e8c
+Author: Chris Kelley <ckelley@redhat.com>
+Date:   Tue Aug 31 12:41:06 2021 +0100
+
+    Fix navigation buttons in CA EE list certs page
+
+commit 64e6acd3e035ecb0eb84d8fe47cd513eb8eaeb3b
+Author: Jon Parrish <jonathon.d.parrish2.ctr@mail.mil>
+Date:   Thu Oct 7 16:39:38 2021 +0000
+
+    Close table so that top navigation is at the top
+---
+ base/ca/shared/webapps/ca/ee/ca/queryCert.template | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/base/ca/shared/webapps/ca/ee/ca/queryCert.template b/base/ca/shared/webapps/ca/ee/ca/queryCert.template
+index 878e3be..65718e1 100644
+--- a/base/ca/shared/webapps/ca/ee/ca/queryCert.template
++++ b/base/ca/shared/webapps/ca/ee/ca/queryCert.template
+@@ -336,7 +336,7 @@ if (result.recordSet.length == 0) {
+ 	);
+ 
+ 	document.write("<table BORDER=0 CELLSPACING=2 CELLPADDING=6 WIDTH='100%'>\n"+
+-		"<tr align=center><td>\n");
++		"<tr align=center><td></table>\n");
+ 	displayNextForm();
+ 
+ 	document.write(
+@@ -370,7 +370,7 @@ document.write("</table>\n");
+     }
+ 
+ 	document.write("<table BORDER=0 CELLSPACING=2 CELLPADDING=6 WIDTH='100%'>\n"+
+-		"<tr align=center><td>\n");
++		"<tr align=center><td></table>\n");
+ 
+ 	if (result.header.revokeAll != null && result.header.totalRecordCount > 1) {
+ 		displayRevokeAllForm(result.header.totalRecordCount);
+@@ -407,7 +407,7 @@ function renderNextButtonElement(name, label, disabled)
+     result.innerText = label;
+     result.width = 72;
+     result.disabled = disabled ? true : false;
+-    result.onClick = () => doNext(result);
++    result.onclick = () => doNext(result);
+     return result;
+ }
+ 
+-- 
+1.8.3.1
+
+
+From 33fd6ff7de3c847939269ca1307d5854af258d4c Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Mon, 11 Oct 2021 16:26:19 -0700
+Subject: [PATCH 2/3] Bug2007405-pkispawn bails out too easily in
+ validate_system_cert
+
+For pkispawn, in def validate_system_cert, it appears some unexpected
+conditions could happen that would trigger failur to
+  pki-server subsystem-cert-validate
+
+Some of these conditions probably could have been resolved manually
+if installation were allowed to complete.
+
+This patch is to print out the result as information then allow the
+installation to continue. It doesn't necessarily mean that the
+installation will succeed, but it will at least go further to allow
+for better investigation.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=2007405
+
+(cherry picked from commit 656d3426cc3ace5cac3624384e05c4233caae022)
+---
+ base/server/python/pki/server/__init__.py | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/base/server/python/pki/server/__init__.py b/base/server/python/pki/server/__init__.py
+index 3512e94..3856c85 100644
+--- a/base/server/python/pki/server/__init__.py
++++ b/base/server/python/pki/server/__init__.py
+@@ -450,9 +450,12 @@ class PKISubsystem(object):
+ 
+         logger.debug('Command: %s', ' '.join(cmd))
+ 
+-        subprocess.check_output(
+-            cmd,
+-            stderr=subprocess.STDOUT)
++        try:
++            print(subprocess.check_output(
++                cmd,
++                stderr=subprocess.STDOUT))
++        except subprocess.CalledProcessError as v:
++            print("pki-server subsystem-cert-validate stdout output:\n", v.output)
+ 
+     def export_system_cert(
+             self,
+-- 
+1.8.3.1
+
+
+From 82a3f261c83c33c395f4ee720b3cb09c9007580c Mon Sep 17 00:00:00 2001
+From: Andrew Wnuk <92763627+ajwnuk@users.noreply.github.com>
+Date: Thu, 21 Oct 2021 15:17:55 -0700
+Subject: [PATCH 3/3] Authentication issue #3629 (#3787)
+
+Co-authored-by: Andrew Wnuk <awnuk@purestorage.com>
+(cherry picked from commit cf3fb92a029991da029ba81b5f68e254e44532d7)
+---
+ .../authentication/UserPwdDirAuthentication.java   | 150 +++++++++++++++++++++
+ 1 file changed, 150 insertions(+)
+
+diff --git a/base/server/cms/src/com/netscape/cms/authentication/UserPwdDirAuthentication.java b/base/server/cms/src/com/netscape/cms/authentication/UserPwdDirAuthentication.java
+index ead8650..faaefb6 100644
+--- a/base/server/cms/src/com/netscape/cms/authentication/UserPwdDirAuthentication.java
++++ b/base/server/cms/src/com/netscape/cms/authentication/UserPwdDirAuthentication.java
+@@ -18,12 +18,21 @@
+ package com.netscape.cms.authentication;
+ 
+ // ldap java sdk
++import java.util.ArrayList;
+ import java.util.Enumeration;
++import java.util.HashMap;
+ import java.util.Locale;
++import java.util.Map;
+ import java.util.Vector;
+ 
++
+ import netscape.ldap.LDAPConnection;
+ import netscape.ldap.LDAPException;
++import netscape.ldap.LDAPAttribute;
++import netscape.ldap.LDAPConnection;
++import netscape.ldap.LDAPEntry;
++import netscape.ldap.LDAPSearchResults;
++import netscape.ldap.LDAPv2;
+ 
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.authentication.AuthToken;
+@@ -44,6 +53,8 @@ import com.netscape.certsrv.profile.IProfileAuthenticator;
+ import com.netscape.certsrv.property.Descriptor;
+ import com.netscape.certsrv.property.IDescriptor;
+ import com.netscape.certsrv.request.IRequest;
++import com.netscape.certsrv.usrgrp.IUGSubsystem;
++import com.netscape.certsrv.usrgrp.IUser;
+ // cert server x509 imports
+ // java sdk imports.
+ 
+@@ -65,6 +76,12 @@ public class UserPwdDirAuthentication extends DirBasedAuthentication
+ 
+     protected String mAttrName = null;
+     protected String mAttrDesc = null;
++    protected String mMemberAttrName = null;
++    protected String mMemberAttrValue = null;
++    protected String mInternalGroup = null;
++    protected boolean mInternalUserRequired = false;
++    protected IUGSubsystem mUGS = null;
++    protected String mAttrs[] = null;
+ 
+     /* Holds configuration parameters accepted by this implementation.
+      * This list is passed to the configuration console so configuration
+@@ -82,6 +99,10 @@ public class UserPwdDirAuthentication extends DirBasedAuthentication
+                     "ldap.basedn",
+                     "ldap.attrName",
+                     "ldap.attrDesc",
++                    "ldap.memberAttrName",
++                    "ldap.memberAttrValue",
++                    "ldap.internalUserRequired",
++                    "ldap.internalGroup",
+                     "ldap.minConns",
+                     "ldap.maxConns",
+             };
+@@ -138,6 +159,36 @@ public class UserPwdDirAuthentication extends DirBasedAuthentication
+         }
+         CMS.debug("UserPwdDirAuthentication init  mAttr=" + mAttr +
+                 "  mAttrName=" + mAttrName + "  mAttrDesc=" + mAttrDesc);
++
++        // Optional attribute, which presence and value have to be checked if included in configuration
++        mMemberAttrName = mLdapConfig.getString("memberAttrName", null);
++        mMemberAttrName = (mMemberAttrName != null)? mMemberAttrName.trim(): mMemberAttrName; 
++        if (mMemberAttrName != null && mMemberAttrName.length() > 0) {
++            mMemberAttrValue = mLdapConfig.getString("memberAttrValue", null);
++            mMemberAttrValue = (mMemberAttrValue != null)? mMemberAttrValue.trim(): mMemberAttrValue; 
++            CMS.debug("UserPwdDirAuthentication init  mMemberAttrName=" + mMemberAttrName + "  mMemberAttrValue=" + mMemberAttrValue);
++        }
++        // Optional attribute, which indicates local user entry presence that have to be checked if included in configuration
++        mInternalUserRequired = mLdapConfig.getBoolean("internalUserRequired", false);
++        CMS.debug("UserPwdDirAuthentication init  mInternalUserRequired=" + mInternalUserRequired);
++        mInternalGroup = mLdapConfig.getString("internalGroup", null);
++        mInternalGroup = (mInternalGroup != null)? mInternalGroup.trim(): mInternalGroup;
++        if (mInternalGroup != null && mInternalGroup.length() > 0) {
++            mInternalUserRequired = true;
++            CMS.debug("UserPwdDirAuthentication init  mInternalGroup=" + mInternalGroup);
++        }
++        if (mInternalUserRequired) {
++            mUGS = (IUGSubsystem) CMS.getSubsystem(CMS.SUBSYSTEM_UG);
++        }
++
++        ArrayList<String> attrList = new ArrayList<>();
++        if (mInternalUserRequired) {
++            attrList.add(CRED_UID);
++        }
++        if (mMemberAttrName != null && mMemberAttrName.length() > 0 && !mMemberAttrName.equalsIgnoreCase(CRED_UID)) {
++            attrList.add(mMemberAttrName);
++        }
++        mAttrs = (String[])attrList.toArray(new String[attrList.size()]);
+     }
+ 
+     /**
+@@ -182,6 +233,105 @@ public class UserPwdDirAuthentication extends DirBasedAuthentication
+             // bind as user dn and pwd - authenticates user with pwd.
+             conn.authenticate(userdn, pwd);
+             CMS.debug("Authenticated: userdn=" + userdn);
++
++            LDAPEntry entry = null;
++            Map<String, String[]> entryAttributes = new HashMap<String, String[]>();
++            if (mAttrs != null && mAttrs.length > 0) {
++                LDAPSearchResults results = conn.search(userdn, LDAPConnection.SCOPE_BASE, null, mAttrs, false);
++                if (results != null && results.hasMoreElements()) {
++                    entry = results.next();
++                    if (entry != null) {
++                        CMS.debug("Reviewing entry: " + entry.getDN());
++                        for (int i = 0; i < mAttrs.length; i++) {
++                            LDAPAttribute memberAttribute = entry.getAttribute(mAttrs[i]);
++                            if (memberAttribute != null) {
++                                String[] values = memberAttribute.getStringValueArray();
++                                if (values != null && values.length > 0) {
++                                    entryAttributes.put(mAttrs[i], values);
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++            if (mAttrs != null && mAttrs.length > 0 && (entry == null || entryAttributes.size() == 0)) {
++                CMS.debug("Failed to obtain data required for verification.");
++                throw new EMissingCredential(CMS.getUserMessage("CMS_AUTHENTICATION_INVALID_CREDENTIAL"));
++            }
++
++            if (mMemberAttrName != null && mMemberAttrName.length() > 0) {
++                CMS.debug("Authenticating: memberAttribute=" + mMemberAttrName);
++                String[] values = entryAttributes.get(mMemberAttrName);
++                boolean verified = false;
++                if (values != null && values.length > 0) {
++                    if (mMemberAttrValue != null && mMemberAttrValue.length() > 0) {
++                        for (int i = 0; i < values.length; i++) {
++                            if (mMemberAttrValue.equalsIgnoreCase(values[i])) {
++                                verified = true;
++                            }
++                        }
++                    } else {
++                        verified = true;
++                    }
++                }
++                if (!verified) {
++                    CMS.debug("Failed to verify memberAttribute");
++                    throw new EMissingCredential(CMS.getUserMessage("CMS_AUTHENTICATION_INVALID_CREDENTIAL"));
++                }
++
++                if (mInternalUserRequired) {
++                    values = entryAttributes.get(CRED_UID);
++                    verified = false;
++                    if (values != null && values.length > 0) {
++                        for (int i = 0; i < values.length; i++) {
++                            IUser user = mUGS.getUser(values[i]);
++                            if (user != null) {
++                                if (mInternalGroup != null && mInternalGroup.length() > 0) {
++                                    if (mUGS.isMemberOf(values[i], mInternalGroup)) {
++                                        verified = true;
++                                        CMS.debug("Authenticated: user='" + user.getUserDN() + "' is member of '" + mInternalGroup + "'");
++                                    }
++                                } else {
++                                    verified = true;
++                                    CMS.debug("Authenticated: user='" + user.getUserDN() + "'");
++                                }
++                            }
++                        }
++                    }
++                    if (!verified) {
++                        CMS.debug("Failed to verify userAttribute");
++                        throw new EMissingCredential(CMS.getUserMessage("CMS_AUTHENTICATION_INVALID_CREDENTIAL"));
++                    }
++                }
++
++            } else {
++                if (mInternalUserRequired) {
++                    String userAttr = (mAttr.equalsIgnoreCase(CRED_UID))? attr: entryAttributes.get(CRED_UID)[0];
++                    if (userAttr != null  && userAttr.length() > 0) {
++                        CMS.debug("Authenticating: InternalUser: '" + CRED_UID + "=" + userAttr + "'");
++                        IUser user = mUGS.getUser(userAttr);
++                        if (user != null) {
++                            if (mInternalGroup != null && mInternalGroup.length() > 0) {
++                                if (mUGS.isMemberOf(userAttr, mInternalGroup)) {
++                                    CMS.debug("Authenticated: user='" + user.getUserDN() + "' is member of '" + mInternalGroup + "'");
++                                } else {
++                                    CMS.debug("Authenticated: user='" + user.getUserDN() + "' is NOT member of '" + mInternalGroup + "'");
++                                    throw new EMissingCredential(CMS.getUserMessage("CMS_AUTHENTICATION_INVALID_CREDENTIAL"));
++                                }
++                            } else {
++                                CMS.debug("Authenticated: user='" + user.getUserDN() + "'");
++                            }
++                        } else {
++                            CMS.debug("Missing InternalUser='" + userAttr + "'");
++                            throw new EMissingCredential(CMS.getUserMessage("CMS_AUTHENTICATION_INVALID_CREDENTIAL"));
++                        }
++                    } else {
++                        CMS.debug("Incorrect attribute requested: '" + mAttr + "' instead of '" + CRED_UID + "'");
++                        throw new EMissingCredential(CMS.getUserMessage("CMS_AUTHENTICATION_INVALID_CREDENTIAL"));
++                    }
++                }
++            }
++
+             // set attr in the token.
+             token.set(mAttr, attr);
+ 
+-- 
+1.8.3.1
+

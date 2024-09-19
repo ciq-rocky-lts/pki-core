@@ -1,0 +1,338 @@
+From b6b624d191a003f273283a1bc00278f534ff41a6 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Wed, 19 Oct 2022 16:42:43 +0100
+Subject: [PATCH 1/2] Use internal JAXP implementation.
+
+JAXP will attempt to use xerces if the JAR is installed, so force the
+application to use the internal parsers instead.
+
+(cherry picked from commit ce5876dae1888cae0631f039694762811d6dab94)
+---
+ .../cmscore/src/com/netscape/cmscore/apps/CMSEngine.java | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java b/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
+index db341d5..de98f74 100644
+--- a/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
++++ b/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
+@@ -43,6 +43,8 @@ import java.util.Vector;
+ 
+ import javax.servlet.ServletException;
+ import javax.servlet.http.HttpServlet;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
+ 
+ import org.apache.commons.lang.StringUtils;
+ import org.apache.xerces.parsers.DOMParser;
+@@ -58,6 +60,7 @@ import org.mozilla.jss.crypto.PrivateKey;
+ import org.mozilla.jss.crypto.Signature;
+ import org.mozilla.jss.crypto.SignatureAlgorithm;
+ import org.mozilla.jss.util.PasswordCallback;
++import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.NodeList;
+ 
+@@ -618,9 +621,16 @@ public class CMSEngine implements ICMSEngine {
+         try {
+             String instanceRoot = mConfig.getString("instanceRoot");
+             String path = instanceRoot + File.separator + "conf" + File.separator + SERVER_XML;
+-            DOMParser parser = new DOMParser();
+-            parser.parse(path);
+-            NodeList nodes = parser.getDocument().getElementsByTagName("Connector");
++            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance(
++                    "com.sun.org.apache.xerces.internal.jaxp.DocumentBuilderFactoryImpl",
++                    this.getClass().getClassLoader());
++            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
++            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
++            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
++            DocumentBuilder builder = factory.newDocumentBuilder();
++            Document doc = builder.parse(new File(path));
++            doc.getDocumentElement().normalize();
++            NodeList nodes = doc.getElementsByTagName("Connector");
+             String parentName = "";
+             String name = "";
+             String port = "";
+-- 
+1.8.3.1
+
+
+From 646e4eda892d17236ba67f659292ecfcb7790466 Mon Sep 17 00:00:00 2001
+From: Chris Kelley <ckelley@redhat.com>
+Date: Thu, 20 Oct 2022 15:04:40 +0100
+Subject: [PATCH 2/2] Remove references to Xerces JAR
+
+Requesting use of the internal JAXP DocumentBuilderFactory
+implementation renders the JAR unnecessary (from the perspective of PKI,
+it is still required and installed by dependencies of PKI).
+---
+ base/CMakeLists.txt                                          |  8 --------
+ base/ca/shared/conf/jkconfig.manifest                        |  2 +-
+ base/common/src/CMakeLists.txt                               | 10 +---------
+ base/java-tools/src/CMakeLists.txt                           | 10 +---------
+ base/javadoc/CMakeLists.txt                                  |  2 +-
+ base/kra/shared/conf/jkconfig.manifest                       |  2 +-
+ base/ocsp/shared/conf/jkconfig.manifest                      |  2 +-
+ base/server/CMakeLists.txt                                   |  3 +--
+ .../cmscore/src/com/netscape/cmscore/apps/CMSEngine.java     |  1 -
+ base/server/share/conf/catalina.properties                   |  2 +-
+ base/server/test/CMakeLists.txt                              |  2 +-
+ base/test/src/CMakeLists.txt                                 |  2 +-
+ base/tks/shared/conf/jkconfig.manifest                       |  2 +-
+ base/tps/shared/conf/jkconfig.manifest                       |  2 +-
+ base/util/src/CMakeLists.txt                                 | 12 ++----------
+ base/util/test/CMakeLists.txt                                |  2 +-
+ 16 files changed, 15 insertions(+), 49 deletions(-)
+
+diff --git a/base/CMakeLists.txt b/base/CMakeLists.txt
+index 5be5b24..d5548a1 100644
+--- a/base/CMakeLists.txt
++++ b/base/CMakeLists.txt
+@@ -196,14 +196,6 @@ find_file(XALAN_JAR
+         /usr/share/java
+ )
+ 
+-find_file(XERCES_JAR
+-    NAMES
+-        xerces-j2.jar
+-    PATHS
+-        ${JAVA_LIB_INSTALL_DIR}
+-        /usr/share/java
+-)
+-
+ # The order is important!
+ if (APPLICATION_FLAVOR_PKI_CORE OR
+     APPLICATION_FLAVOR_PKI_CONSOLE)
+diff --git a/base/ca/shared/conf/jkconfig.manifest b/base/ca/shared/conf/jkconfig.manifest
+index 3ba1f2e..5731b47 100644
+--- a/base/ca/shared/conf/jkconfig.manifest
++++ b/base/ca/shared/conf/jkconfig.manifest
+@@ -1,2 +1,2 @@
+ Main-Class: org.apache.jk.config.WebXml2Jk
+-Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xercesImpl.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
++Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
+diff --git a/base/common/src/CMakeLists.txt b/base/common/src/CMakeLists.txt
+index 705d62c..85b3a4c 100644
+--- a/base/common/src/CMakeLists.txt
++++ b/base/common/src/CMakeLists.txt
+@@ -53,14 +53,6 @@ find_file(XALAN_JAR
+         /usr/share/java
+ )
+ 
+-find_file(XERCES_JAR
+-    NAMES
+-        xerces-j2.jar
+-    PATHS
+-        ${JAVA_LIB_INSTALL_DIR}
+-        /usr/share/java
+-)
+-
+ find_file(RESTEASY_JAXRS_JAR
+     NAMES
+         resteasy-jaxrs.jar
+@@ -102,7 +94,7 @@ javac(pki-certsrv-classes
+         *.java
+     CLASSPATH
+         ${SLF4J_API_JAR}
+-        ${LDAPJDK_JAR} ${SERVLET_JAR} ${VELOCITY_JAR} ${XALAN_JAR} ${XERCES_JAR}
++        ${LDAPJDK_JAR} ${SERVLET_JAR} ${VELOCITY_JAR} ${XALAN_JAR}
+         ${JSS_JAR} ${COMMONS_CODEC_JAR} ${COMMONS_HTTPCLIENT_JAR} ${COMMONS_IO_JAR}
+         ${APACHE_COMMONS_LANG_JAR}
+         ${TOMCAT_CATALINA_JAR} ${TOMCAT_UTIL_JAR} ${SYMKEY_JAR}
+diff --git a/base/java-tools/src/CMakeLists.txt b/base/java-tools/src/CMakeLists.txt
+index 7c57eaa..527aff2 100644
+--- a/base/java-tools/src/CMakeLists.txt
++++ b/base/java-tools/src/CMakeLists.txt
+@@ -45,14 +45,6 @@ find_file(XALAN_JAR
+         /usr/share/java
+ )
+ 
+-find_file(XERCES_JAR
+-    NAMES
+-        xerces-j2.jar
+-    PATHS
+-        ${JAVA_LIB_INSTALL_DIR}
+-        /usr/share/java
+-)
+-
+ find_file(RESTEASY_JAXRS_JAR
+     NAMES
+         resteasy-jaxrs.jar
+@@ -87,7 +79,7 @@ javac(pki-tools-classes
+         *.java
+     CLASSPATH
+         ${PKI_NSUTIL_JAR} ${PKI_CMSUTIL_JAR} ${PKI_CERTSRV_JAR}
+-        ${XALAN_JAR} ${XERCES_JAR}
++        ${XALAN_JAR}
+         ${JSS_JAR} ${LDAPJDK_JAR} ${COMMONS_CODEC_JAR} ${COMMONS_IO_JAR}
+         ${APACHE_COMMONS_CLI_JAR} ${APACHE_COMMONS_LANG_JAR}
+         ${JAXRS_API_JAR} ${RESTEASY_JAXRS_JAR} ${RESTEASY_ATOM_PROVIDER_JAR}
+diff --git a/base/javadoc/CMakeLists.txt b/base/javadoc/CMakeLists.txt
+index c477a33..8e00141 100644
+--- a/base/javadoc/CMakeLists.txt
++++ b/base/javadoc/CMakeLists.txt
+@@ -89,7 +89,7 @@ javadoc(pki-javadoc
+         org.dogtagpki
+     CLASSPATH
+         ${SLF4J_API_JAR}
+-        ${XALAN_JAR} ${XERCES_JAR}
++        ${XALAN_JAR}
+         ${APACHE_COMMONS_CLI_JAR} ${APACHE_COMMONS_LANG_JAR}
+         ${COMMONS_CODEC_JAR} ${COMMONS_HTTPCLIENT_JAR} ${COMMONS_IO_JAR}
+         ${LDAPJDK_JAR} ${VELOCITY_JAR}
+diff --git a/base/kra/shared/conf/jkconfig.manifest b/base/kra/shared/conf/jkconfig.manifest
+index 3ba1f2e..5731b47 100644
+--- a/base/kra/shared/conf/jkconfig.manifest
++++ b/base/kra/shared/conf/jkconfig.manifest
+@@ -1,2 +1,2 @@
+ Main-Class: org.apache.jk.config.WebXml2Jk
+-Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xercesImpl.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
++Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
+diff --git a/base/ocsp/shared/conf/jkconfig.manifest b/base/ocsp/shared/conf/jkconfig.manifest
+index 3ba1f2e..5731b47 100644
+--- a/base/ocsp/shared/conf/jkconfig.manifest
++++ b/base/ocsp/shared/conf/jkconfig.manifest
+@@ -1,2 +1,2 @@
+ Main-Class: org.apache.jk.config.WebXml2Jk
+-Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xercesImpl.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
++Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
+diff --git a/base/server/CMakeLists.txt b/base/server/CMakeLists.txt
+index ec2d37b..09ded9c 100644
+--- a/base/server/CMakeLists.txt
++++ b/base/server/CMakeLists.txt
+@@ -46,7 +46,7 @@ javac(pki-server-classes
+         ${HTTPCORE_JAR} ${HTTPCLIENT_JAR}
+         ${JSS_JAR} ${SYMKEY_JAR}
+         ${LDAPJDK_JAR}
+-        ${XALAN_JAR} ${XERCES_JAR}
++        ${XALAN_JAR}
+         ${SERVLET_JAR} ${TOMCAT_CATALINA_JAR} ${TOMCAT_UTIL_JAR}
+         ${TOMCATJSS_JAR} ${VELOCITY_JAR}
+         ${JAXRS_API_JAR} ${RESTEASY_JAXRS_JAR} ${RESTEASY_ATOM_PROVIDER_JAR}
+@@ -130,7 +130,6 @@ add_custom_command(
+     COMMAND /usr/bin/ln -sf /usr/lib/java/symkey.jar ${CMAKE_CURRENT_BINARY_DIR}/common/lib/symkey.jar
+     COMMAND ${CMAKE_COMMAND} -E create_symlink /usr/share/java/tomcatjss.jar common/lib/tomcatjss.jar
+     COMMAND ${CMAKE_COMMAND} -E create_symlink /usr/share/java/velocity.jar common/lib/velocity.jar
+-    COMMAND ${CMAKE_COMMAND} -E create_symlink /usr/share/java/xerces-j2.jar common/lib/xerces-j2.jar
+     COMMAND ${CMAKE_COMMAND} -E create_symlink /usr/share/java/xml-commons-apis.jar common/lib/xml-commons-apis.jar
+     COMMAND ${CMAKE_COMMAND} -E create_symlink /usr/share/java/xml-commons-resolver.jar common/lib/xml-commons-resolver.jar
+ )
+diff --git a/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java b/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
+index de98f74..23beb96 100644
+--- a/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
++++ b/base/server/cmscore/src/com/netscape/cmscore/apps/CMSEngine.java
+@@ -47,7 +47,6 @@ import javax.xml.parsers.DocumentBuilder;
+ import javax.xml.parsers.DocumentBuilderFactory;
+ 
+ import org.apache.commons.lang.StringUtils;
+-import org.apache.xerces.parsers.DOMParser;
+ import org.dogtagpki.legacy.core.policy.GeneralNameUtil;
+ import org.dogtagpki.legacy.policy.IGeneralNameAsConstraintsConfig;
+ import org.dogtagpki.legacy.policy.IGeneralNamesAsConstraintsConfig;
+diff --git a/base/server/share/conf/catalina.properties b/base/server/share/conf/catalina.properties
+index 2199a78..f7edc01 100644
+--- a/base/server/share/conf/catalina.properties
++++ b/base/server/share/conf/catalina.properties
+@@ -108,7 +108,7 @@ jstl.jar,\
+ geronimo-spec-jaxrpc*.jar,wsdl4j*.jar,\
+ ant.jar,ant-junit*.jar,aspectj*.jar,jmx.jar,h2*.jar,hibernate*.jar,httpclient*.jar,\
+ jmx-tools.jar,jta*.jar,log4j*.jar,mail*.jar,slf4j*.jar,\
+-xercesImpl.jar,xmlParserAPIs.jar,xml-apis.jar,\
++xmlParserAPIs.jar,xml-apis.jar,\
+ dnsns.jar,ldapsec.jar,localedata.jar,sunjce_provider.jar,sunmscapi.jar,\
+ sunpkcs11.jar,jhall.jar,tools.jar,\
+ sunec.jar,zipfs.jar,\
+diff --git a/base/server/test/CMakeLists.txt b/base/server/test/CMakeLists.txt
+index 707493f..ea24f86 100644
+--- a/base/server/test/CMakeLists.txt
++++ b/base/server/test/CMakeLists.txt
+@@ -36,7 +36,7 @@ javac(pki-server-test-classes
+     CLASSPATH
+         ${PKI_NSUTIL_JAR} ${PKI_CMSUTIL_JAR}
+         ${PKI_CERTSRV_JAR} ${PKI_CMS_JAR} ${PKI_CMSCORE_JAR} ${PKI_CMSBUNDLE_JAR}
+-        ${LDAPJDK_JAR} ${SERVLET_JAR} ${VELOCITY_JAR} ${XALAN_JAR} ${XERCES_JAR}
++        ${LDAPJDK_JAR} ${SERVLET_JAR} ${VELOCITY_JAR} ${XALAN_JAR}
+         ${JSS_JAR} ${COMMONS_CODEC_JAR} ${SYMKEY_JAR}
+         ${HAMCREST_JAR} ${JUNIT_JAR}
+         ${CMAKE_BINARY_DIR}/test/classes
+diff --git a/base/test/src/CMakeLists.txt b/base/test/src/CMakeLists.txt
+index 24e72aa..4a8355a 100644
+--- a/base/test/src/CMakeLists.txt
++++ b/base/test/src/CMakeLists.txt
+@@ -6,7 +6,7 @@ javac(pki-test-classes
+     SOURCES
+         *.java
+     CLASSPATH
+-        ${XALAN_JAR} ${XERCES_JAR}
++        ${XALAN_JAR}
+         ${HAMCREST_JAR} ${JUNIT_JAR}
+     OUTPUT_DIR
+         ${CMAKE_BINARY_DIR}/test/classes
+diff --git a/base/tks/shared/conf/jkconfig.manifest b/base/tks/shared/conf/jkconfig.manifest
+index 3ba1f2e..5731b47 100644
+--- a/base/tks/shared/conf/jkconfig.manifest
++++ b/base/tks/shared/conf/jkconfig.manifest
+@@ -1,2 +1,2 @@
+ Main-Class: org.apache.jk.config.WebXml2Jk
+-Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xercesImpl.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
++Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
+diff --git a/base/tps/shared/conf/jkconfig.manifest b/base/tps/shared/conf/jkconfig.manifest
+index 3ba1f2e..5731b47 100644
+--- a/base/tps/shared/conf/jkconfig.manifest
++++ b/base/tps/shared/conf/jkconfig.manifest
+@@ -1,2 +1,2 @@
+ Main-Class: org.apache.jk.config.WebXml2Jk
+-Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xercesImpl.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
++Class-Path: tomcat-jk2.jar commons-logging.jar crimson.jar xmlApis.jar tomcat-util.jar log4j.jar log4j-core.jar
+diff --git a/base/util/src/CMakeLists.txt b/base/util/src/CMakeLists.txt
+index a2269b2..883ead0 100644
+--- a/base/util/src/CMakeLists.txt
++++ b/base/util/src/CMakeLists.txt
+@@ -52,14 +52,6 @@ find_file(XALAN_JAR
+         /usr/share/java
+ )
+ 
+-find_file(XERCES_JAR
+-    NAMES
+-        xerces-j2.jar
+-    PATHS
+-        ${JAVA_LIB_INSTALL_DIR}
+-        /usr/share/java
+-)
+-
+ find_file(NUXWDOG_JAR
+     NAMES
+         nuxwdog.jar
+@@ -73,7 +65,7 @@ javac(pki-nsutil-classes
+     SOURCES
+         netscape/*.java
+     CLASSPATH
+-        ${APACHE_COMMONS_LANG_JAR} ${LDAPJDK_JAR} ${XALAN_JAR} ${XERCES_JAR}
++        ${APACHE_COMMONS_LANG_JAR} ${LDAPJDK_JAR} ${XALAN_JAR}
+         ${JSS_JAR} ${COMMONS_CODEC_JAR}
+         ${SLF4J_API_JAR}
+     OUTPUT_DIR
+@@ -118,7 +110,7 @@ javac(pki-cmsutil-classes
+         com/netscape/cmsutil/*.java
+     CLASSPATH
+         ${APACHE_COMMONS_LANG_JAR} ${HTTPCORE_JAR} ${HTTPCLIENT_JAR}
+-        ${LDAPJDK_JAR} ${XALAN_JAR} ${XERCES_JAR}
++        ${LDAPJDK_JAR} ${XALAN_JAR}
+         ${JSS_JAR} ${COMMONS_CODEC_JAR} ${NUXWDOG_JAR}
+         ${SLF4J_API_JAR}
+     OUTPUT_DIR
+diff --git a/base/util/test/CMakeLists.txt b/base/util/test/CMakeLists.txt
+index cc5c07a..3267c66 100644
+--- a/base/util/test/CMakeLists.txt
++++ b/base/util/test/CMakeLists.txt
+@@ -7,7 +7,7 @@ javac(pki-util-test-classes
+         *.java
+     CLASSPATH
+         ${PKI_NSUTIL_JAR} ${PKI_CMSUTIL_JAR}
+-        ${JSS_JAR} ${LDAPJDK_JAR} ${COMMONS_CODEC_JAR} ${XALAN_JAR} ${XERCES_JAR}
++        ${JSS_JAR} ${LDAPJDK_JAR} ${COMMONS_CODEC_JAR} ${XALAN_JAR}
+         ${HAMCREST_JAR} ${JUNIT_JAR}
+     OUTPUT_DIR
+         ${CMAKE_BINARY_DIR}/test/classes
+-- 
+1.8.3.1
+

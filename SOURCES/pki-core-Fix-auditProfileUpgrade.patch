@@ -1,0 +1,225 @@
+From df372adab25c9e4081eb89c77c61f0ab80605c0d Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 1 Dec 2020 09:57:43 -0800
+Subject: [PATCH 1/2] Bug1883639 -additional support on upgrade for audit cert
+ profile
+
+It was discovered that upgrading from 10.5.18-7 to 10.5.18-8 the script was
+never executed.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1883639
+
+(cherry picked from commit 2b922a1d53fc222444c0ee7be6da41609e29cc7c)
+---
+ .../10.5.17/02-AddProfileCaAuditSigningCert        | 52 ----------------------
+ .../10.5.18/01-AddProfileCaAuditSigningCert        | 52 ++++++++++++++++++++++
+ 2 files changed, 52 insertions(+), 52 deletions(-)
+ delete mode 100644 base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert
+ create mode 100644 base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert
+
+diff --git a/base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert b/base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert
+deleted file mode 100644
+index 02b8477..0000000
+--- a/base/server/upgrade/10.5.17/02-AddProfileCaAuditSigningCert
++++ /dev/null
+@@ -1,52 +0,0 @@
+-# Authors:
+-#     Christina Fu <cfu@redhat.com>
+-#
+-# Copyright Red Hat, Inc.
+-#
+-# SPDX-License-Identifier: GPL-2.0-or-later
+-
+-from __future__ import absolute_import
+-import logging
+-import os
+-import shutil
+-
+-import pki
+-
+-logger = logging.getLogger(__name__)
+-
+-
+-class AddProfileCaAuditSigningCert(pki.server.upgrade.PKIServerUpgradeScriptlet):
+-
+-    def __init__(self):
+-        super(AddProfileCaAuditSigningCert, self).__init__()
+-        self.message = 'Add caAuditSigningCert profile'
+-
+-    def upgrade_subsystem(self, instance, subsystem):
+-
+-        if subsystem.name != 'ca':
+-            return
+-
+-        path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caAuditSigningCert.cfg')
+-
+-        if not os.path.exists(path):
+-            logger.info('Creating caAuditSigningCert.cfg')
+-            self.backup(path)
+-            shutil.copyfile('/usr/share/pki/ca/profiles/ca/caAuditSigningCert.cfg', path)
+-            os.chown(path, instance.uid, instance.gid)
+-            os.chmod(path, 0o0660)
+-
+-        logger.info('Adding caAuditSigningCert into profile.list')
+-        profile_list = subsystem.config.get('profile.list').split(',')
+-        if 'caAuditSigningCert' not in profile_list:
+-            profile_list.append('caAuditSigningCert')
+-            profile_list.sort()
+-            subsystem.config['profile.list'] = ','.join(profile_list)
+-
+-        logger.info('Adding profile.caAuditSigningCert.class_id')
+-        subsystem.config['profile.caAuditSigningCert.class_id'] = 'caEnrollImpl'
+-
+-        logger.info('Adding profile.caAuditSigningCert.config')
+-        subsystem.config['profile.caAuditSigningCert.config'] = path
+-
+-        self.backup(subsystem.cs_conf)
+-        subsystem.save()
+diff --git a/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert b/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert
+new file mode 100644
+index 0000000..02b8477
+--- /dev/null
++++ b/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert
+@@ -0,0 +1,52 @@
++# Authors:
++#     Christina Fu <cfu@redhat.com>
++#
++# Copyright Red Hat, Inc.
++#
++# SPDX-License-Identifier: GPL-2.0-or-later
++
++from __future__ import absolute_import
++import logging
++import os
++import shutil
++
++import pki
++
++logger = logging.getLogger(__name__)
++
++
++class AddProfileCaAuditSigningCert(pki.server.upgrade.PKIServerUpgradeScriptlet):
++
++    def __init__(self):
++        super(AddProfileCaAuditSigningCert, self).__init__()
++        self.message = 'Add caAuditSigningCert profile'
++
++    def upgrade_subsystem(self, instance, subsystem):
++
++        if subsystem.name != 'ca':
++            return
++
++        path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caAuditSigningCert.cfg')
++
++        if not os.path.exists(path):
++            logger.info('Creating caAuditSigningCert.cfg')
++            self.backup(path)
++            shutil.copyfile('/usr/share/pki/ca/profiles/ca/caAuditSigningCert.cfg', path)
++            os.chown(path, instance.uid, instance.gid)
++            os.chmod(path, 0o0660)
++
++        logger.info('Adding caAuditSigningCert into profile.list')
++        profile_list = subsystem.config.get('profile.list').split(',')
++        if 'caAuditSigningCert' not in profile_list:
++            profile_list.append('caAuditSigningCert')
++            profile_list.sort()
++            subsystem.config['profile.list'] = ','.join(profile_list)
++
++        logger.info('Adding profile.caAuditSigningCert.class_id')
++        subsystem.config['profile.caAuditSigningCert.class_id'] = 'caEnrollImpl'
++
++        logger.info('Adding profile.caAuditSigningCert.config')
++        subsystem.config['profile.caAuditSigningCert.config'] = path
++
++        self.backup(subsystem.cs_conf)
++        subsystem.save()
+-- 
+1.8.3.1
+
+
+From 3057354b81d16212d54693eef743c4cb3dbe38b5 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Tue, 1 Dec 2020 13:26:20 -0800
+Subject: [PATCH 2/2] Bug1883639-part2-auditProfileUpgrade
+
+This patch addresses the issue where when caSignedLogCert.cfg was renamed
+caAuditSigningCert where
+  * The profileIDMapping and profileSetIDMapping params in the following
+    profile still contains the old names:
+      base/ca/shared/conf/caAuditSigningCert.profile
+  * at renewal time, the profile will no longer be available
+
+The solution provided is to
+  * correct the two mapping param names in caAuditSigningCert.profile
+  * re-enable caSignedLogCert.cfg (but kept invisible)
+
+fixes issue relating to https://bugzilla.redhat.com/show_bug.cgi?id=1883639
+
+(cherry picked from commit de51aaf50bc44bb72a749736fa84268f8caf9ffb)
+---
+ base/ca/shared/conf/caAuditSigningCert.profile            |  4 ++--
+ base/ca/shared/profiles/ca/caSignedLogCert.cfg            |  6 +++---
+ .../upgrade/10.5.18/01-AddProfileCaAuditSigningCert       | 15 +++++++++++++++
+ 3 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/base/ca/shared/conf/caAuditSigningCert.profile b/base/ca/shared/conf/caAuditSigningCert.profile
+index 5983a18..cb9b5e1 100644
+--- a/base/ca/shared/conf/caAuditSigningCert.profile
++++ b/base/ca/shared/conf/caAuditSigningCert.profile
+@@ -4,8 +4,8 @@
+ id=caAuditSigningCert.profile
+ name=CA Audit Signing Certificate Profile
+ description=This profile creates a CA Audit signing certificate that is valid for audit log signing purpose.
+-profileIDMapping=caSignedLogCert
+-profileSetIDMapping=caLogSigningSet
++profileIDMapping=caAuditSigningCert
++profileSetIDMapping=auditSigningCertSet
+ list=2,4,6,8
+ 2.default.class=com.netscape.cms.profile.def.ValidityDefault
+ 2.default.name=Validity Default
+diff --git a/base/ca/shared/profiles/ca/caSignedLogCert.cfg b/base/ca/shared/profiles/ca/caSignedLogCert.cfg
+index 01e21f1..cc058b0 100644
+--- a/base/ca/shared/profiles/ca/caSignedLogCert.cfg
++++ b/base/ca/shared/profiles/ca/caSignedLogCert.cfg
+@@ -1,9 +1,9 @@
+-desc=This profile is for enrolling audit log signing certificates
++desc=(deprecated; use caAuditSigningCert) This profile is for enrolling audit log signing certificates
+ visible=false
+-enable=false
++enable=true
+ enableBy=admin
+ auth.class_id=
+-name=Manual Audit Log Signing Certificate Enrollment
++name=(deprecated; use caAuditSigningCert) Manual Audit Log Signing Certificate Enrollment
+ input.list=i1,i2
+ input.i1.class_id=certReqInputImpl
+ input.i2.class_id=submitterInfoInputImpl
+diff --git a/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert b/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert
+index 02b8477..5cec8d9 100644
+--- a/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert
++++ b/base/server/upgrade/10.5.18/01-AddProfileCaAuditSigningCert
+@@ -26,6 +26,21 @@ class AddProfileCaAuditSigningCert(pki.server.upgrade.PKIServerUpgradeScriptlet)
+         if subsystem.name != 'ca':
+             return
+ 
++        # enable old profile caSignedLogCert to properly deprecate
++        opath = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caSignedLogCert.cfg')
++        self.backup(opath)
++
++        oconfig = {}
++
++        pki.util.load_properties(opath, oconfig)
++
++        oconfig['enable'] = 'true'
++        oconfig['desc'] = '(deprecated; use caAuditSigningCert) This profile is for enrolling audit log signing certificates'
++        oconfig['name'] = '(deprecated; use caAuditSigningCert) Manual Audit Log Signing Certificate Enrollment'
++
++        pki.util.store_properties(opath, oconfig)
++
++        # now handle new profile
+         path = os.path.join(subsystem.base_dir, 'profiles', 'ca', 'caAuditSigningCert.cfg')
+ 
+         if not os.path.exists(path):
+-- 
+1.8.3.1
+

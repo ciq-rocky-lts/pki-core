@@ -1,0 +1,118 @@
+From dd58b89aebab04c6f3c1516352e8d3496e0e4c45 Mon Sep 17 00:00:00 2001
+From: jmagne <jmagne@redhat.com>
+Date: Fri, 31 May 2024 15:31:02 -0700
+Subject: [PATCH] Fix Bug 2265180 - Add Support for Symmetric Key Rollover
+ [RHCS 9.7.z]. (#4760)
+
+We found in QE a situation in fips mode with the hsm that the calculation of the scp03 keycheck value
+could fail. Simply making that method behave like the scp01 version of the method fixes the issue.
+
+Also added some trivial code to apease tpsclient. We do so by creating a new secret config value used only
+by those testing the product with tpsclient:
+
+channel.scp01.no.le.byte=true
+
+This will skip the le zero byte on only the generatekey and readobject apdu's only if scp01 is detected and this value is true.
+Otherwise everything will default to current behavior and the le byte of zero will be added as per current behavior.
+
+Fix case when rollover feature checks config in non external reg mode and caused NPE.
+(cherry picked from commit 853327d4c141a825b741535bebf621919d85200c)
+---
+ .../cms/servlet/tks/SecureChannelProtocol.java     | 14 +++++++--
+ .../server/tps/channel/SecureChannel.java          | 35 +++++++++++++++++++---
+ 2 files changed, 42 insertions(+), 7 deletions(-)
+
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/tks/SecureChannelProtocol.java b/base/server/cms/src/com/netscape/cms/servlet/tks/SecureChannelProtocol.java
+index b899c28..d39bc01 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/tks/SecureChannelProtocol.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/tks/SecureChannelProtocol.java
+@@ -1189,8 +1189,8 @@ public class SecureChannelProtocol {
+             throw new EBaseException(method + "No raw array to use to create key!");
+         }
+ 
+-        SymmetricKey transport = getSharedSecretKey(token);
+-        unwrapped = this.unwrapSymKeyOnToken(token, transport, inputKeyArray, isPerm, SymmetricKey.DES3);
++        //RedHat For DES3 don's use the AES shared secret as wrapping key
++        unwrapped = this.unwrapSymKeyOnToken(token, null, inputKeyArray, isPerm, SymmetricKey.DES3);
+ 
+         CMS.debug(method + "Returning symkey: length = " + unwrapped.getLength());
+         //CMS.debug(method + "Returning symkey: " + unwrapped);
+@@ -1630,8 +1630,16 @@ public class SecureChannelProtocol {
+         byte[] output = null;
+         byte[] finalOutput = new byte[3];
+ 
++        // RedHat :Do the same behavior as computeKeyCheck, use the token where the aes key resides.
++        String keysToken = null;
++        try {
++            keysToken = symKey.getOwningToken().getName();
++        } catch (TokenException e1) {
++            throw new EBaseException(e1 + " Can't get owning token for key/");
++        }
++
+         try {
+-            output = computeAES_CBCEncryption(symKey, selectedToken, key_check_message, key_check_iv);
++            output = computeAES_CBCEncryption(symKey, keysToken, key_check_message, key_check_iv);
+         } catch (EBaseException e) {
+             CMS.debug(method + e);
+             throw e;
+diff --git a/base/tps/src/org/dogtagpki/server/tps/channel/SecureChannel.java b/base/tps/src/org/dogtagpki/server/tps/channel/SecureChannel.java
+index bd590a7..6719de9 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/channel/SecureChannel.java
++++ b/base/tps/src/org/dogtagpki/server/tps/channel/SecureChannel.java
+@@ -1160,8 +1160,10 @@ public class SecureChannel {
+         while (sum < len) {
+ 
+             read = new ReadObjectAPDU(objectID.toBytesArray(), cur_offset, cur_read);
+-            // Add a 0x00 Le byte
+-            read.setTrailer(new TPSBuffer((byte) 0x00));
++            //RedHat Add a 0x00 Le byte, appease tpsclient if configured
++            if(!skipTrailerLeByteScp01()) {
++                read.setTrailer(new TPSBuffer((byte) 0x00));
++            }
+ 
+             //CMS.debug("read encoding: " + read.getEncoding().toHexString());
+             computeAPDU(read);
+@@ -1452,8 +1454,10 @@ public class SecureChannel {
+             generate_key_apdu = new GenerateKeyAPDU((byte) pe1, (byte) pe2, (byte) algorithm, keySize,
+                     (byte) option, (byte) 0, wrappedChallenge, keyCheck);
+ 
+-            // Add a 0x00 Le byte
+-            generate_key_apdu.setTrailer(new TPSBuffer((byte) 0x00));
++            // RedHat Add a 0x00 Le byte, appease tpsclient if configured.
++            if(!skipTrailerLeByteScp01()) {
++                generate_key_apdu.setTrailer(new TPSBuffer((byte) 0x00));
++            }
+ 
+             computeAPDU(generate_key_apdu);
+ 
+@@ -1839,4 +1843,27 @@ public class SecureChannel {
+ 
+         CMS.debug(method + " Successful delete key data operation completed.");
+     }
++
++    // RedHat
++    //Check config param if we want to not add le bytes for certain scp01 apdu's.
++    //default is  false. If method returns false the le byte will be added as before.
++    public boolean skipTrailerLeByteScp01() {
++
++        IConfigStore configStore = CMS.getConfigStore();
++
++        String method = "SecureChannel.skipTrailerLeByteScp01: ";
++        boolean skip = false;
++        try {
++            String configName = "channel.scp01.no.le.byte";
++
++            if(platProtInfo.isSCP01()) {
++                skip = configStore.getBoolean(configName,false);
++            }
++        } catch (Exception e) {
++            skip = false;
++        }
++
++        CMS.debug(method + skip);
++        return skip;
++    }
+ }
+-- 
+1.8.3.1
+

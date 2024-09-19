@@ -1,0 +1,114 @@
+From f5549f8c760035bc15d88109dfd947e91c5bf1e9 Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Mon, 7 Jun 2021 11:23:03 -0700
+Subject: [PATCH] Bug1905374 restrict EE profile list and enrollment submission
+ per LDAP group without immediate issuance
+
+It's always been the case by design that if authentication (auth.instance_id=X) is specified in a profile, then as long as a request passes both authentication and authorization (authz.Y) then the issuance would be granted.
+In this patch, an option per profile is added to override such design and would require explicit agent approval even when both auth and authz passed.
+
+This new option is auth.explicitApprovalRequired and the value is true
+or false,with false being the default if not set.
+
+An example configuration in a directory-based authentication profile
+would have something like the following:
+
+         auth.instance_id=UserDirEnrollment
+         auth.explicitApprovalRequired=true
+         authz.acl=group=requestors
+
+addressed https://bugzilla.redhat.com/show_bug.cgi?id=1905374
+
+(cherry picked from commit 8e78a2b912e7c3bd015e4da1f1630d0f35145104)
+---
+ .../src/com/netscape/certsrv/profile/IProfile.java  |  2 ++
+ .../netscape/cms/profile/common/EnrollProfile.java  | 21 +++++++++++++++++++--
+ .../netscape/cms/servlet/cert/CertProcessor.java    |  6 +++++-
+ 3 files changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/base/common/src/com/netscape/certsrv/profile/IProfile.java b/base/common/src/com/netscape/certsrv/profile/IProfile.java
+index b4605cf..e076232 100644
+--- a/base/common/src/com/netscape/certsrv/profile/IProfile.java
++++ b/base/common/src/com/netscape/certsrv/profile/IProfile.java
+@@ -424,6 +424,8 @@ public interface IProfile {
+      */
+     public void submit(IAuthToken token, IRequest request)
+             throws EDeferException, EProfileException;
++    public void submit(IAuthToken token, IRequest request, boolean explicitApprovalRequired)
++            throws EDeferException, EProfileException;
+ 
+     public void setRenewal(boolean renewal);
+ 
+diff --git a/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java b/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java
+index b7fdb9e..afcfa0d 100644
+--- a/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java
++++ b/base/server/cms/src/com/netscape/cms/profile/common/EnrollProfile.java
+@@ -518,6 +518,10 @@ public abstract class EnrollProfile extends BasicProfile
+      */
+     public void submit(IAuthToken token, IRequest request)
+             throws EDeferException, EProfileException {
++        submit(token, request, false);
++    }
++    public void submit(IAuthToken token, IRequest request, boolean explicitApprovalRequired)
++            throws EDeferException, EProfileException {
+         // Request Submission Logic:
+         //
+         // if (Authentication Failed) {
+@@ -549,8 +553,21 @@ public abstract class EnrollProfile extends BasicProfile
+             CMS.debug(e);
+         }
+ 
+-        if (token == null){
+-            CMS.debug(method + " auth token is null; agent manual approval required;");
++        /*
++         * this is where we decide whether to let agent do manual approval
++         *  or not
++         * If auth.instance_id is not set, then request automatically goes
++         * into queue for agent approval.
++         * If auth.explicitApprovalRequired is true, then the request goes into
++         * queue for agent approval even though auth and authz succeed.
++         */
++         if ((token == null) || (explicitApprovalRequired == true)){
++
++            if (token ==  null)
++                CMS.debug(method + " auth token is null; agent manual approval required;");
++            else
++                CMS.debug(method + "explicitApprovalRequired is true; agent manual approval required");
++
+             CMS.debug(method + " validating request");
+             validate(request);
+             try {
+diff --git a/base/server/cms/src/com/netscape/cms/servlet/cert/CertProcessor.java b/base/server/cms/src/com/netscape/cms/servlet/cert/CertProcessor.java
+index 6252e6e..b9eda7c 100644
+--- a/base/server/cms/src/com/netscape/cms/servlet/cert/CertProcessor.java
++++ b/base/server/cms/src/com/netscape/cms/servlet/cert/CertProcessor.java
+@@ -31,6 +31,7 @@ import com.netscape.certsrv.authentication.ExternalAuthToken;
+ import com.netscape.certsrv.authentication.IAuthToken;
+ import com.netscape.certsrv.base.EBaseException;
+ import com.netscape.certsrv.base.EPropertyNotFound;
++import com.netscape.certsrv.base.IConfigStore;
+ import com.netscape.certsrv.cert.CertEnrollmentRequest;
+ import com.netscape.certsrv.logging.ILogger;
+ import com.netscape.certsrv.logging.event.CertRequestProcessedEvent;
+@@ -224,6 +225,9 @@ public class CertProcessor extends CAProcessor {
+ 
+         for (IRequest req : reqs) {
+             try {
++                IConfigStore profileConf = profile.getConfigStore().getSubStore("auth");
++                boolean explicitApprovalRequired = profileConf.getBoolean("explicitApprovalRequired", false);
++
+                 // reset the "auditRequesterID"
+                 auditRequesterID = auditRequesterID(req);
+ 
+@@ -242,7 +246,7 @@ public class CertProcessor extends CAProcessor {
+                 */
+ 
+                 CMS.debug("CertProcessor.submitRequest: calling profile submit");
+-                profile.submit(authToken, req);
++                profile.submit(authToken, req, explicitApprovalRequired);
+                 req.setRequestStatus(RequestStatus.COMPLETE);
+ 
+                 X509CertImpl x509cert = req.getExtDataInCert(IEnrollProfile.REQUEST_ISSUED_CERT);
+-- 
+1.8.3.1
+

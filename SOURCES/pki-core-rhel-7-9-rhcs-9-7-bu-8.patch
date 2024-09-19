@@ -1,0 +1,1885 @@
+From dcf1135e8d55ba8bcfc6df07883aa3704b20a81f Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Thu, 1 Jul 2021 14:58:31 -0700
+Subject: [PATCH 1/5] Bug1958277 PKCS10Client Attribute Encoding
+
+PKCS10Client has an option "-k" which allows for individual DN
+attributes to be encoded differently and separately.
+For example:
+    PKCS10Client -p <passwd> -d . -k true -o req.txt -n 'cn=UTF8String:aa,ou=BMPString:bb,o=cc'
+
+This option might have been accidentally disabled.  In this patch, the
+attribute encoding code is moved to CryptoUtil.java with some
+refactoring, and calls to getJssName() is re-enabled for subjectName
+in PKCS10Client;
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1958277
+
+(cherry picked from commit 22008c96bf943e575c254cbd0e8414a478481263)
+---
+ .../src/com/netscape/cmstools/PKCS10Client.java    | 151 +---------------
+ .../com/netscape/cmsutil/crypto/CryptoUtil.java    | 196 ++++++++++++++++++++-
+ 2 files changed, 196 insertions(+), 151 deletions(-)
+
+diff --git a/base/java-tools/src/com/netscape/cmstools/PKCS10Client.java b/base/java-tools/src/com/netscape/cmstools/PKCS10Client.java
+index 137049e..4c002c2 100644
+--- a/base/java-tools/src/com/netscape/cmstools/PKCS10Client.java
++++ b/base/java-tools/src/com/netscape/cmstools/PKCS10Client.java
+@@ -24,18 +24,11 @@ import java.io.PrintStream;
+ import java.security.KeyPair;
+ 
+ import org.mozilla.jss.CryptoManager;
+-import org.mozilla.jss.asn1.BMPString;
+ import org.mozilla.jss.asn1.OBJECT_IDENTIFIER;
+-import org.mozilla.jss.asn1.PrintableString;
+-import org.mozilla.jss.asn1.TeletexString;
+-import org.mozilla.jss.asn1.UTF8String;
+-import org.mozilla.jss.asn1.UniversalString;
+ import org.mozilla.jss.crypto.CryptoToken;
+ import org.mozilla.jss.crypto.KeyPairAlgorithm;
+ import org.mozilla.jss.crypto.KeyPairGenerator;
+ import org.mozilla.jss.crypto.PrivateKey;
+-import org.mozilla.jss.pkix.primitive.AVA;
+-import org.mozilla.jss.pkix.primitive.Name;
+ import org.mozilla.jss.util.Password;
+ 
+ import com.netscape.cmsutil.crypto.CryptoUtil;
+@@ -138,6 +131,7 @@ public class PKCS10Client {
+                     enable_encoding = true;
+                 else
+                     enable_encoding = false;
++                System.out.println("PKCS10Client: enable_encoding =" + enable_encoding);
+             } else if (name.equals("-s")) {
+                 String ec_sensitive_s = args[i+1];
+                 ec_sensitive = Integer.parseInt(ec_sensitive_s);
+@@ -289,7 +283,7 @@ public class PKCS10Client {
+ 
+ 
+             PKCS10 certReq = CryptoUtil.createCertificationRequest(
+-                    subjectName, pair, extns);
++                    subjectName, enable_encoding, pair, extns);
+ 
+             if (certReq == null) {
+                 System.out.println("PKCS10Client: cert request null");
+@@ -333,145 +327,4 @@ public class PKCS10Client {
+         }
+     }
+ 
+-    static boolean isEncoded (String elementValue) {
+-        boolean encoded = false;
+-
+-        if (elementValue != null && ((elementValue.startsWith("UTF8String:")) ||
+-                                     (elementValue.startsWith("PrintableString:")) ||
+-                                     (elementValue.startsWith("BMPString:")) ||
+-                                     (elementValue.startsWith("TeletexString:")) ||
+-                                     (elementValue.startsWith("UniversalString:")))) {
+-            encoded = true;
+-        }
+-        return encoded;
+-    }
+-
+-    static Name addNameElement (Name name, OBJECT_IDENTIFIER oid, int n, String elementValue) {
+-        try {
+-            String encodingType = (n > 0)? elementValue.substring(0, n): null;
+-            String nameValue = (n > 0)? elementValue.substring(n+1): null;
+-            if (encodingType != null && encodingType.length() > 0 &&
+-                nameValue != null && nameValue.length() > 0) {
+-                if (encodingType.equals("UTF8String")) {
+-                    name.addElement( new AVA(oid, new UTF8String(nameValue)));
+-                } else if (encodingType.equals("PrintableString")) {
+-                    name.addElement( new AVA(oid, new PrintableString(nameValue)));
+-                } else if (encodingType.equals("BMPString")) {
+-                    name.addElement( new AVA(oid, new BMPString(nameValue)));
+-                } else if (encodingType.equals("TeletexString")) {
+-                    name.addElement( new AVA(oid, new TeletexString(nameValue)));
+-                } else if (encodingType.equals("UniversalString")) {
+-                    name.addElement( new AVA(oid, new UniversalString(nameValue)));
+-                }
+-            }
+-        }  catch (Exception e)  {
+-            System.out.println("PKCS10Client: Error adding name element: " + elementValue + " Error: "  + e.toString());
+-        }
+-        return name;
+-    }
+-
+-    static Name getJssName(boolean enable_encoding, String dn) {
+-
+-        X500Name x5Name = null;
+-
+-        try {
+-            x5Name = new X500Name(dn);
+-        } catch (IOException e) {
+-
+-            System.out.println("PKCS10Client: Illegal Subject Name:  " + dn + " Error: " + e.toString());
+-            System.out.println("PKCS10Client: Filling in default Subject Name......");
+-            return null;
+-        }
+-
+-        Name ret = new Name();
+-        netscape.security.x509.RDN[] names = null;
+-        names = x5Name.getNames();
+-        int nameLen = x5Name.getNamesLength();
+-
+-        netscape.security.x509.RDN cur = null;
+-
+-        for (int i = 0; i < nameLen; i++) {
+-            cur = names[i];
+-            String rdnStr = cur.toString();
+-            String[] split = rdnStr.split("=");
+-
+-            if (split.length != 2)
+-                continue;
+-            int n = split[1].indexOf(':');
+-
+-            try {
+-                if (split[0].equals("UID")) {
+-                    if (enable_encoding && isEncoded(split[1])) {
+-                        ret = addNameElement(ret, new OBJECT_IDENTIFIER("0.9.2342.19200300.100.1.1"),
+-                                             n, split[1]);
+-                    } else {
+-                        ret.addElement(new AVA(new OBJECT_IDENTIFIER("0.9.2342.19200300.100.1.1"),
+-                                               new PrintableString(split[1])));
+-                    }
+-                    //                 System.out.println("UID found : " + split[1]);
+-                }
+-
+-                if (split[0].equals("C")) {
+-                    ret.addCountryName(split[1]);
+-                    //                   System.out.println("C found : " + split[1]);
+-                    continue;
+-                }
+-
+-                if (split[0].equals("CN")) {
+-                    if (enable_encoding && isEncoded(split[1])) {
+-                        ret = addNameElement (ret, Name.commonName, n, split[1]);
+-                    } else {
+-                        ret.addCommonName(split[1]);
+-                    }
+-                    //                  System.out.println("CN found : " + split[1]);
+-                    continue;
+-                }
+-
+-                if (split[0].equals("L")) {
+-                    if (enable_encoding && isEncoded(split[1])) {
+-                        ret = addNameElement (ret, Name.localityName, n, split[1]);
+-                    } else {
+-                        ret.addLocalityName(split[1]);
+-                    }
+-                    //                 System.out.println("L found : " + split[1]);
+-                    continue;
+-                }
+-
+-                if (split[0].equals("O")) {
+-                    if (enable_encoding && isEncoded(split[1])) {
+-                        ret = addNameElement (ret, Name.organizationName, n, split[1]);
+-                    } else {
+-                        ret.addOrganizationName(split[1]);
+-                    }
+-                    //                System.out.println("O found : " + split[1]);
+-                    continue;
+-                }
+-
+-                if (split[0].equals("ST")) {
+-                    if (enable_encoding && isEncoded(split[1])) {
+-                        ret = addNameElement (ret, Name.stateOrProvinceName, n, split[1]);
+-                    } else {
+-                        ret.addStateOrProvinceName(split[1]);
+-                    }
+-                    //               System.out.println("ST found : " + split[1]);
+-                    continue;
+-                }
+-
+-                if (split[0].equals("OU")) {
+-                    if (enable_encoding && isEncoded(split[1])) {
+-                        ret = addNameElement (ret, Name.organizationalUnitName, n, split[1]);
+-                    } else {
+-                        ret.addOrganizationalUnitName(split[1]);
+-                    }
+-                    //              System.out.println("OU found : " + split[1]);
+-                    continue;
+-                }
+-            } catch (Exception e) {
+-                System.out.println("PKCS10Client: Error constructing RDN: " + rdnStr + " Error: " + e.toString());
+-                continue;
+-            }
+-        }
+-
+-        return ret;
+-    }
+ }
+diff --git a/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java b/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java
+index 2fe4757..befceed 100644
+--- a/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java
++++ b/base/util/src/com/netscape/cmsutil/crypto/CryptoUtil.java
+@@ -65,6 +65,11 @@ import org.mozilla.jss.asn1.ANY;
+ import org.mozilla.jss.asn1.ASN1Value;
+ import org.mozilla.jss.asn1.BIT_STRING;
+ import org.mozilla.jss.asn1.INTEGER;
++import org.mozilla.jss.asn1.BMPString;
++import org.mozilla.jss.asn1.PrintableString;
++import org.mozilla.jss.asn1.TeletexString;
++import org.mozilla.jss.asn1.UTF8String;
++import org.mozilla.jss.asn1.UniversalString;
+ import org.mozilla.jss.asn1.InvalidBERException;
+ import org.mozilla.jss.asn1.NULL;
+ import org.mozilla.jss.asn1.OBJECT_IDENTIFIER;
+@@ -114,6 +119,7 @@ import org.mozilla.jss.pkix.crmf.EncryptedKey;
+ import org.mozilla.jss.pkix.crmf.EncryptedValue;
+ import org.mozilla.jss.pkix.crmf.PKIArchiveOptions;
+ import org.mozilla.jss.pkix.primitive.AlgorithmIdentifier;
++import org.mozilla.jss.pkix.primitive.AVA;
+ import org.mozilla.jss.pkix.primitive.Name;
+ import org.mozilla.jss.pkix.primitive.SubjectPublicKeyInfo;
+ import org.mozilla.jss.ssl.SSLSocket;
+@@ -1691,6 +1697,14 @@ public class CryptoUtil {
+             throws NoSuchAlgorithmException, NoSuchProviderException,
+             InvalidKeyException, IOException, CertificateException,
+             SignatureException {
++        return createCertificationRequest(subjectName, false, keyPair, exts);
++    }
++    // encodeSubj works with PKCS10Client "-k" option
++    public static PKCS10 createCertificationRequest(String subjectName,
++            boolean encodeSubj, KeyPair keyPair, Extensions exts)
++            throws NoSuchAlgorithmException, NoSuchProviderException,
++            InvalidKeyException, IOException, CertificateException,
++            SignatureException {
+         String method = "CryptoUtil: createCertificationRequest: ";
+ 
+         String alg = "SHA256withRSA";
+@@ -1705,7 +1719,7 @@ public class CryptoUtil {
+         }
+ 
+         return createCertificationRequest(
+-                subjectName, key, (org.mozilla.jss.crypto.PrivateKey) keyPair.getPrivate(),
++                subjectName, encodeSubj, key, (org.mozilla.jss.crypto.PrivateKey) keyPair.getPrivate(),
+                 alg, exts);
+     }
+ 
+@@ -1714,6 +1728,14 @@ public class CryptoUtil {
+             throws NoSuchAlgorithmException, NoSuchProviderException,
+             InvalidKeyException, IOException, CertificateException,
+             SignatureException {
++        return createCertificationRequest(subjectName, false, pubk, prik, alg, null);
++    }
++    public static PKCS10 createCertificationRequest(String subjectName,
++            boolean encodeSubj,
++            X509Key pubk, PrivateKey prik, String alg, Extensions exts)
++            throws NoSuchAlgorithmException, NoSuchProviderException,
++            InvalidKeyException, IOException, CertificateException,
++            SignatureException {
+         X509Key key = pubk;
+         java.security.Signature sig = java.security.Signature.getInstance(alg,
+                 "Mozilla-JSS");
+@@ -1734,13 +1756,182 @@ public class CryptoUtil {
+         } else {
+             pkcs10 = new PKCS10(key);
+         }
+-        X500Name name = new X500Name(subjectName);
++
++        Name n = getJssName(encodeSubj, subjectName);
++        ByteArrayOutputStream subjectEncStream = new ByteArrayOutputStream();
++        n.encode(subjectEncStream);
++        byte[] b = subjectEncStream.toByteArray();
++        X500Name name = new X500Name(b);
+         X500Signer signer = new X500Signer(sig, name);
+ 
+         pkcs10.encodeAndSign(signer);
+         return pkcs10;
+     }
+ 
++    static boolean isEncoded (String elementValue) {
++        boolean encoded = false;
++
++        //System.out.println("CryptoUtil: isEncoded: elementValue =" +
++        //    elementValue);
++        if (elementValue != null && ((elementValue.startsWith("UTF8String:")) ||
++                                     (elementValue.startsWith("PrintableString:")) ||
++                                     (elementValue.startsWith("BMPString:")) ||
++                                     (elementValue.startsWith("TeletexString:")) ||
++                                     (elementValue.startsWith("UniversalString:")))) {
++            encoded = true;
++        }
++        return encoded;
++    }
++
++    static Name addNameElement (Name name, OBJECT_IDENTIFIER oid, int n, String elementValue) {
++        // System.out.println("CryptoUtil: addNameElement: elementValue =" +
++        //     elementValue);
++        try {
++            String encodingType = (n > 0)? elementValue.substring(0, n): null;
++            // System.out.println("CryptoUtil: addNameElement: encodingType =" +
++            //     encodingType);
++            String nameValue = (n > 0)? elementValue.substring(n+1): null;
++            // System.out.println("CryptoUtil: addNameElement: nameValue =" +
++            //     nameValue);
++            if (encodingType != null && encodingType.length() > 0 &&
++                nameValue != null && nameValue.length() > 0) {
++                if (encodingType.equals("UTF8String")) {
++                // System.out.println("CryptoUtil: addNameElement: UTF8String");
++                    name.addElement( new AVA(oid, new UTF8String(nameValue)));
++                } else if (encodingType.equals("PrintableString")) {
++                // System.out.println("CryptoUtil: addNameElement: PrintableString");
++                    name.addElement( new AVA(oid, new PrintableString(nameValue)));
++                } else if (encodingType.equals("BMPString")) {
++                // System.out.println("CryptoUtil: addNameElement: BMPString");
++                    name.addElement( new AVA(oid, new BMPString(nameValue)));
++                } else if (encodingType.equals("TeletexString")) {
++                // System.out.println("CryptoUtil: addNameElement: TeletexString");
++                    name.addElement( new AVA(oid, new TeletexString(nameValue)));
++                } else if (encodingType.equals("UniversalString")) {
++                // System.out.println("CryptoUtil: addNameElement: UniversalString");
++                    name.addElement( new AVA(oid, new UniversalString(nameValue)));
++                }
++            }
++        }  catch (Exception e)  {
++            System.out.println("CryptoUtil: Error adding name element: " + elementValue + " Error: "  + e.toString());
++        }
++        return name;
++    }
++
++    static Name getJssName(boolean enable_encoding, String dn) {
++
++        X500Name x5Name = null;
++
++        //System.out.println("CryptoUtil: getJssName: dn= " + dn);
++        try {
++            x5Name = new X500Name(dn);
++        } catch (IOException e) {
++
++            System.out.println("CryptoUtil: Illegal Subject Name:  " + dn + " Error: " + e.toString());
++            System.out.println("CryptoUtil: Filling in default Subject Name......");
++            return null;
++        }
++
++        Name ret = new Name();
++        netscape.security.x509.RDN[] names = x5Name.getNames();
++        int nameLen = x5Name.getNamesLength();
++
++        netscape.security.x509.RDN cur = null;
++
++        for (int i = 0; i < nameLen; i++) {
++            cur = names[i];
++            String rdnStr = cur.toString();
++            String[] split = rdnStr.split("=");
++
++            if (split.length != 2)
++                continue;
++            // System.out.println("  getJssName: split[0] =" + split[0]);
++            // System.out.println("  getJssName: split[1] =" + split[1]);
++            int n = split[1].indexOf(':');
++
++            try {
++                if (split[0].equals("UID")) {
++                    if (enable_encoding && isEncoded(split[1])) {
++                        // System.out.println("    getJssName: encoded UID");
++                        ret = addNameElement(ret, new OBJECT_IDENTIFIER("0.9.2342.19200300.100.1.1"),
++                                             n, split[1]);
++                    } else {
++                        // System.out.println("    getJssName: not encoded UID");
++                        ret.addElement(new AVA(new OBJECT_IDENTIFIER("0.9.2342.19200300.100.1.1"),
++                                               new PrintableString(split[1])));
++                    }
++                    //                 System.out.println("UID found : " + split[1]);
++                }
++
++                if (split[0].equals("C")) {
++                    ret.addCountryName(split[1]);
++                    //                   System.out.println("C found : " + split[1]);
++                    continue;
++                }
++
++                if (split[0].equals("CN")) {
++                    if (enable_encoding && isEncoded(split[1])) {
++                        // System.out.println("    getJssName: encoded CN");
++                        ret = addNameElement (ret, Name.commonName, n, split[1]);
++                    } else {
++                        // System.out.println("    getJssName: not encoded CN");
++                        ret.addCommonName(split[1]);
++                    }
++                    //                  System.out.println("CN found : " + split[1]);
++                    continue;
++                }
++
++                if (split[0].equals("L")) {
++                    if (enable_encoding && isEncoded(split[1])) {
++                        ret = addNameElement (ret, Name.localityName, n, split[1]);
++                    } else {
++                        ret.addLocalityName(split[1]);
++                    }
++                    //                 System.out.println("L found : " + split[1]);
++                    continue;
++                }
++
++                if (split[0].equals("O")) {
++                    if (enable_encoding && isEncoded(split[1])) {
++                        // System.out.println("    getJssName: encoded O");
++                        ret = addNameElement (ret, Name.organizationName, n, split[1]);
++                    } else {
++                        // System.out.println("    getJssName: not encoded O");
++                        ret.addOrganizationName(split[1]);
++                    }
++                    //                System.out.println("O found : " + split[1]);
++                    continue;
++                }
++
++                if (split[0].equals("ST")) {
++                    if (enable_encoding && isEncoded(split[1])) {
++                        ret = addNameElement (ret, Name.stateOrProvinceName, n, split[1]);
++                    } else {
++                        ret.addStateOrProvinceName(split[1]);
++                    }
++                    //               System.out.println("ST found : " + split[1]);
++                    continue;
++                }
++
++                if (split[0].equals("OU")) {
++                    if (enable_encoding && isEncoded(split[1])) {
++                        // System.out.println("    getJssName: encoded OU");
++                        ret = addNameElement (ret, Name.organizationalUnitName, n, split[1]);
++                    } else {
++                        // System.out.println("    getJssName: not encoded OU");
++                        ret.addOrganizationalUnitName(split[1]);
++                    }
++                    //              System.out.println("OU found : " + split[1]);
++                    continue;
++                }
++            } catch (Exception e) {
++                System.out.println("CryptoUtil: Error constructing RDN: " + rdnStr + " Error: " + e.toString());
++                continue;
++            }
++        }
++
++        return ret;
++    }
+     public static KeyIdentifier createKeyIdentifier(KeyPair keypair)
+             throws NoSuchAlgorithmException, InvalidKeyException {
+         String method = "CryptoUtil: createKeyIdentifier: ";
+@@ -1848,6 +2039,7 @@ public class CryptoUtil {
+         PKCS10 pkcs10 = new PKCS10(key);
+ 
+         X500Name name = new X500Name(subjectName);
++
+         X500Signer signer = new X500Signer(sig, name);
+ 
+         pkcs10.encodeAndSign(signer);
+-- 
+1.8.3.1
+
+
+From b974f1d9daf393efc19308bac42b955c601090b7 Mon Sep 17 00:00:00 2001
+From: "Endi S. Dewata" <edewata@redhat.com>
+Date: Thu, 15 Jul 2021 13:24:26 -0500
+Subject: [PATCH 2/5] Add GitLab synchronization job
+
+The .gitlab-ci.yml has been added to define a job to
+synchronize a branch from an upstream repository to a
+GitLab repository.
+
+(cherry picked from commit 27912b9e4311d4f12499f9f1b59e0b4bf4c5bac5)
+---
+ .gitlab-ci.yml                                    | 22 +++++++++++
+ docs/development/Synchronizing-GitLab-Branch.adoc | 48 +++++++++++++++++++++++
+ 2 files changed, 70 insertions(+)
+ create mode 100644 .gitlab-ci.yml
+ create mode 100644 docs/development/Synchronizing-GitLab-Branch.adoc
+
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+new file mode 100644
+index 0000000..249e240
+--- /dev/null
++++ b/.gitlab-ci.yml
+@@ -0,0 +1,22 @@
++image: fedora
++
++sync:
++
++  script:
++    - echo "Synchronizing $CI_COMMIT_BRANCH branch from $UPSTREAM_URL to $CI_PROJECT_URL"
++    - dnf install -y git
++    - git remote set-url origin https://sync:$ACCESS_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git
++    - git remote remove upstream || true
++    - git remote add upstream $UPSTREAM_URL
++    - git remote -v
++    - git fetch upstream $CI_COMMIT_BRANCH
++    - git checkout upstream/$CI_COMMIT_BRANCH
++    - git log origin/$CI_COMMIT_BRANCH..upstream/$CI_COMMIT_BRANCH --oneline
++    - GIT_SSL_NO_VERIFY=true git push origin HEAD:$CI_COMMIT_BRANCH
++
++  rules:
++    - if: $SYNC == "true"
++
++  tags:
++    # Use shared runners.
++    - shared
+diff --git a/docs/development/Synchronizing-GitLab-Branch.adoc b/docs/development/Synchronizing-GitLab-Branch.adoc
+new file mode 100644
+index 0000000..b0937f2
+--- /dev/null
++++ b/docs/development/Synchronizing-GitLab-Branch.adoc
+@@ -0,0 +1,48 @@
++= Synchronizing GitLab Branch =
++
++== Overview ==
++
++This page describes the procedure to synchronize a branch from an upstream repository
++to a GitLab repository.
++
++== Creating Access Token ==
++
++In the GitLab repository create a project access token with a **write_repository** permission.
++
++See link:https://docs.gitlab.com/ee/user/project/settings/project_access_tokens.html#creating-a-project-access-token[Creating a project access token].
++
++== Configuring Synchronization ==
++
++In the GitLab repository create the following variables:
++
++* `UPSTREAM_URL`: The URL of the upstream repository.
++** Unselect **Protect variable** to synchronize unprotected branches.
++* `ACCESS_TOKEN`: The value of the access token.
++** Unselect **Protect variable** to synchronize unprotected branches.
++** Select **Mask variable** to keep the access token hidden.
++
++See link:https://docs.gitlab.com/ee/ci/variables/#add-a-cicd-variable-to-a-project[Add a CI/CD variable to a project].
++
++== Running Synchronization Manually ==
++
++In the GitLab repository run a pipeline with the following parameters:
++
++* **Run for branch name or tag**: The branch to be synchronized.
++* **Variables**:
++** `SYNC`: `true`
++
++See link:https://docs.gitlab.com/ee/ci/pipelines/#run-a-pipeline-manually[Run a pipeline manually].
++
++== Scheduling Automatic Synchronization ==
++
++In the GitLab repository create a schedule with the following parameters:
++
++* **Interval Pattern**: The frequency of synchronization.
++** To synchronize every hour, enter: `0 * * * *`
++* **Target Branch**: The branch to be synchronized.
++* **Variables**:
++** `SYNC`: `true`
++
++Additional schedules can be created for synchronizing other branches.
++
++See link:https://docs.gitlab.com/ee/ci/pipelines/schedules.html#configuring-pipeline-schedules[Configuring pipeline schedules].
+-- 
+1.8.3.1
+
+
+From 32fcaab4585e893742018855c142d01716430cdb Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 28 Jul 2021 16:21:27 -0700
+Subject: [PATCH 3/5] Bug1959937 - TPS Allowing Token Transactions while the CA
+ is Down
+
+This patch propagates the exception thrown when revocation/unrevocation
+fails so that the token record is not updated on TPS; This allows
+the TPS token to be consistent with the certs on the CA.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1959937
+
+(cherry picked from commit 2f7ed836ab20988386e651c1000f4e12eff6c0af)
+---
+ base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+index b58c24f..147f346 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
++++ b/base/tps/src/org/dogtagpki/server/tps/TPSTokendb.java
+@@ -616,7 +616,7 @@ public class TPSTokendb {
+     }
+ 
+     private void revokeCert(TokenRecord tokenRecord, TPSCertRecord cert, String tokenReason,
+-            String ipAddress, String remoteUser) {
++            String ipAddress, String remoteUser) throws Exception {
+ 
+         String method = "TPSTokendb.revokeCert";
+         String logMsg;
+@@ -678,12 +678,15 @@ public class TPSTokendb {
+             tdbActivity(ActivityDatabase.OP_CERT_REVOCATION, tokenRecord,
+                     ipAddress, e.getMessage(), "failure", remoteUser);
+ 
+-            // continue revoking the next certificate
++            // bail out if revocation failed; This will allow the token
++            // status info to be consistent with that of the certs on the
++            // CA
++            throw e;
+         }
+     }
+ 
+     private void unrevokeCert(TokenRecord tokenRecord, TPSCertRecord cert, String tokenReason,
+-            String ipAddress, String remoteUser) {
++            String ipAddress, String remoteUser) throws Exception {
+ 
+         String method = "TPSTokendb.unrevokeCert";
+         String logMsg;
+@@ -733,7 +736,10 @@ public class TPSTokendb {
+             tdbActivity(ActivityDatabase.OP_CERT_RESTORATION, tokenRecord,
+                     ipAddress, e.getMessage(), "failure", remoteUser);
+ 
+-            // continue unrevoking the next certificate
++            // bail out if revocation failed; This will allow the token
++            // status info to be consistent with that of the certs on the
++            // CA
++            throw e;
+         }
+     }
+ 
+-- 
+1.8.3.1
+
+
+From d413394b2673e94e21dd645e588e934cc05c932b Mon Sep 17 00:00:00 2001
+From: Fraser Tweedale <ftweedal@redhat.com>
+Date: Thu, 30 May 2019 19:42:42 +1000
+Subject: [PATCH 4/5] AuthorityService.getCert/Chain: avoid NPE if CA is not
+ ready
+
+If a LWCA is not ready (i.e. key replication and signing unit
+initialisation has not completed), asking for its certificate (or
+chain) results in a NullPointerException.  Update
+AuthorityService.getCert() and .getChain() to raise
+ResourceNotFoundException instead.
+
+Part of: https://pagure.io/dogtagpki/issue/3102
+
+(cherry picked from commit a491bb99f273a3bd2f8c9540c8c18b2604adc035)
+---
+ .../src/org/dogtagpki/server/ca/rest/AuthorityService.java | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/base/ca/src/org/dogtagpki/server/ca/rest/AuthorityService.java b/base/ca/src/org/dogtagpki/server/ca/rest/AuthorityService.java
+index 36ddc6f..12388c9 100644
+--- a/base/ca/src/org/dogtagpki/server/ca/rest/AuthorityService.java
++++ b/base/ca/src/org/dogtagpki/server/ca/rest/AuthorityService.java
+@@ -140,8 +140,13 @@ public class AuthorityService extends SubsystemService implements AuthorityResou
+         if (ca == null)
+             throw new ResourceNotFoundException("CA \"" + aidString + "\" not found");
+ 
++        org.mozilla.jss.crypto.X509Certificate cert = ca.getCaX509Cert();
++        if (cert == null)
++            throw new ResourceNotFoundException(
++                "Certificate for CA \"" + aidString + "\" not available");
++
+         try {
+-            return Response.ok(ca.getCaX509Cert().getEncoded()).build();
++            return Response.ok(cert.getEncoded()).build();
+         } catch (CertificateEncodingException e) {
+             // this really is a 500 Internal Server Error
+             throw new PKIException("Error encoding certificate: " + e);
+@@ -167,9 +172,14 @@ public class AuthorityService extends SubsystemService implements AuthorityResou
+         if (ca == null)
+             throw new ResourceNotFoundException("CA \"" + aidString + "\" not found");
+ 
++        netscape.security.x509.CertificateChain chain = ca.getCACertChain();
++        if (chain == null)
++            throw new ResourceNotFoundException(
++                "Certificate chain for CA \"" + aidString + "\" not available");
++
+         ByteArrayOutputStream out = new ByteArrayOutputStream();
+         try {
+-            ca.getCACertChain().encode(out);
++            chain.encode(out);
+         } catch (IOException e) {
+             throw new PKIException("Error encoding certificate chain: " + e);
+         }
+-- 
+1.8.3.1
+
+
+From dae038b021e8623b920df8abf3abd5d48ab0636c Mon Sep 17 00:00:00 2001
+From: Christina Fu <cfu@redhat.com>
+Date: Wed, 14 Jul 2021 17:24:59 -0700
+Subject: [PATCH 5/5] Bug1979710-TPS: separate config actions by profile
+ permission list
+
+This patch addresses the issue that TPS agent operations on tokens,
+activities, and profiles are not limited by the types (profiles)
+permmtted to the agent (as described in the documentation).
+This is a regression from 8.x.
+
+The affected operations are:
+ - findProfiles
+ - getProfiles
+ - updateProfile
+ - changeStatus (of a profile)
+ - retrieveTokens
+ - getToken
+ - modifyToken
+ - changeTokenStatus
+ - retrieveActivities
+ - getActivity
+
+Note that some operations that seem like should be affected are not
+due to the fact that they are TPS admin operations and are shielded
+from entering the TPS service at the activity level.  For example,
+deleting a token would be such a case.
+
+The authorization enforcement added in this patch should affect both
+access from the web UI as well as access from PKI CLI.
+Reference: https://github.com/dogtagpki/pki/wiki/PKI-TPS-CLI
+
+Another note: the VLV complicates the resulting page.  If the returned
+entries on the page are all restricted then nothing would be shown.  To
+add a bit more clarity, an <restricted> entry is added to reflect such
+effect so that it would be less confusing to the role user.
+The <restricted> entries are left with the epoch date.
+This would affect both WEB UI and PKI CLI.
+
+Also, a list minute addition to address an issue with 1911472 in
+CertService.java where the subject DN of the CA signing cert should
+be used instead of the issuer.
+
+fixes https://bugzilla.redhat.com/show_bug.cgi?id=1979710
+
+(cherry picked from commit eea6184452505f1755b7e5b9d12b0fb765742fec)
+---
+ .../org/dogtagpki/server/ca/rest/CertService.java  |   2 +-
+ base/tps/shared/conf/CS.cfg                        |   2 +-
+ .../dogtagpki/server/tps/rest/ActivityService.java | 188 ++++++++++++++--
+ .../dogtagpki/server/tps/rest/ProfileService.java  | 125 ++++++++---
+ .../dogtagpki/server/tps/rest/TokenService.java    | 249 ++++++++++++++++-----
+ 5 files changed, 463 insertions(+), 103 deletions(-)
+
+diff --git a/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java b/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java
+index 74d3a5d..f577992 100644
+--- a/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java
++++ b/base/ca/src/org/dogtagpki/server/ca/rest/CertService.java
+@@ -193,7 +193,7 @@ public class CertService extends PKIService implements CertResource {
+ 
+             processor.setAuthority(authority);
+ 
+-            caX500DN = (X500Name) authority.getCACert().getIssuerDN();
++            caX500DN = (X500Name) authority.getCACert().getSubjectDN();
+ 
+         } catch (EBaseException e) {
+             throw new PKIException(e.getMessage());
+diff --git a/base/tps/shared/conf/CS.cfg b/base/tps/shared/conf/CS.cfg
+index 4bd4bb7..2e5d499 100644
+--- a/base/tps/shared/conf/CS.cfg
++++ b/base/tps/shared/conf/CS.cfg
+@@ -2361,7 +2361,7 @@ target.Profile_Mappings.displayname=Token Profile Mapping Resolvers
+ target.Profile_Mappings.list=enrollProfileMappingResolver,formatProfileMappingResolver,pinResetProfileMappingResolver
+ target.Profile_Mappings.pattern=mappingResolver\.$name\.mapping\..*
+ target.Profiles.displayname=Token Profile
+-target.Profiles.list=userKey,soKey,soCleanUserToken,soUserKey,cleanToken,soCleanSoToken,tokenKey
++target.Profiles.list=userKey,soKey,soCleanUserToken,soUserKey,cleanToken,soCleanSoToken,tokenKey,externalRegISEtoken,externalRegAddToToken,delegateISEtoken,delegateIEtoken
+ target.Profiles.pattern=op\..*\.$name\..*
+ target.Subsystem_Connections.displayname=Subsystem Connection
+ target.Subsystem_Connections.list=
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/ActivityService.java b/base/tps/src/org/dogtagpki/server/tps/rest/ActivityService.java
+index 37a3083..4f07be7 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/ActivityService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/ActivityService.java
+@@ -21,15 +21,20 @@ package org.dogtagpki.server.tps.rest;
+ import java.io.UnsupportedEncodingException;
+ import java.net.URI;
+ import java.net.URLEncoder;
++import java.util.Date;
+ import java.util.Iterator;
++import java.util.List;
+ 
+ import javax.ws.rs.core.Response;
+ 
+ import org.dogtagpki.server.tps.TPSSubsystem;
+ import org.dogtagpki.server.tps.dbs.ActivityDatabase;
+ import org.dogtagpki.server.tps.dbs.ActivityRecord;
++import org.dogtagpki.server.tps.dbs.TokenDatabase;
++import org.dogtagpki.server.tps.dbs.TokenRecord;
+ import org.jboss.resteasy.plugins.providers.atom.Link;
+ 
++import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.base.BadRequestException;
+ import com.netscape.certsrv.base.PKIException;
+@@ -38,6 +43,9 @@ import com.netscape.certsrv.logging.ActivityCollection;
+ import com.netscape.certsrv.logging.ActivityData;
+ import com.netscape.certsrv.logging.ActivityResource;
+ import com.netscape.cms.servlet.base.PKIService;
++import com.netscape.certsrv.user.UserResource;
++import com.netscape.certsrv.usrgrp.IUGSubsystem;
++import com.netscape.certsrv.usrgrp.IUser;
+ 
+ /**
+  * @author Endi S. Dewata
+@@ -74,6 +82,21 @@ public class ActivityService extends PKIService implements ActivityResource {
+         return activityData;
+     }
+ 
++    public ActivityData createRestrictedActivityData() {
++
++        ActivityData activityData = new ActivityData();
++        activityData.setID("<restricted>");
++        activityData.setTokenID("<restricted>");
++        activityData.setUserID("<restricted>");
++        activityData.setIP("<restricted>");
++        activityData.setOperation("<restricted>");
++        activityData.setResult("<restricted>");
++        activityData.setMessage("<restricted>");
++        activityData.setDate(new Date(0L));
++
++        return activityData;
++    }
++
+     public ActivityRecord createActivityRecord(ActivityData activityData) {
+ 
+         ActivityRecord activityRecord = new ActivityRecord();
+@@ -91,8 +114,8 @@ public class ActivityService extends PKIService implements ActivityResource {
+ 
+     @Override
+     public Response findActivities(String filter, Integer start, Integer size) {
+-
+-        CMS.debug("ActivityService.findActivities()");
++        String method = "ActivityService.findActivities: ";
++        CMS.debug(method);
+ 
+         if (filter != null && filter.length() < MIN_FILTER_LENGTH) {
+             throw new BadRequestException("Filter is too short.");
+@@ -136,24 +159,65 @@ public class ActivityService extends PKIService implements ActivityResource {
+             Integer size,
+             ActivityCollection response) throws Exception {
+ 
++        String method = "ActivityService.retrieveActivitiesWithVLV: ";
++        CMS.debug(method);
+         // search with VLV sorted by date in reverse order
+         IDBVirtualList<ActivityRecord> list = database.findRecords(
+                 null, null, new String[] { "-date" }, size);
+ 
++        List<String> authorizedProfiles = getAuthorizedProfiles();
++
+         int total = list.getSize();
++        CMS.debug(method + "total: " + total);
++        int retTotal = 0; // debugging only
+ 
+         // return entries in the requested page
+-        for (int i = start; i < start + size && i < total; i++) {
+-            ActivityRecord record = list.getElementAt(i);
+-
+-            if (record == null) {
+-                CMS.debug("ActivityService: Activity record not found");
+-                throw new PKIException("Activity record not found");
++        if (authorizedProfiles != null) {
++            if (authorizedProfiles.contains(UserResource.ALL_PROFILES)) {
++                for (int i = start; i < start + size && i < total; i++) {
++                    ActivityRecord record = list.getElementAt(i);
++
++                    response.addEntry(createActivityData(record));
++                    retTotal++;
++                }
++            } else { // not authorized for all profiles
++                for (int i = start; i < start + size && i < total; i++) {
++                    ActivityRecord record = list.getElementAt(i);
++
++                    //CMS.debug(method + "record.Id="+ record.getId());
++                    // On some rare occasions, some activities don't have
++                    // their token type filled in. It is therefore necessary
++                    // to get it from the token record directly.
++                    String type = record.getType();
++                    //CMS.debug(method + "record.tokenType="+ type);
++                    if ((type == null) || type.isEmpty()) {
++                        CMS.debug(method + "record.tokenType null...getting from token record");
++                        String tokenID = record.getTokenID();
++                        if ((tokenID != null) && !tokenID.isEmpty()) {
++                            TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
++                            TokenDatabase t_database = subsystem.getTokenDatabase();
++                            TokenRecord t_record = t_database.getRecord(tokenID);
++                            if (t_record != null)
++                                type = t_record.getType();
++                        }
++                    }
++
++                    //CMS.debug(method + "type="+ type);
++                    if ((type == null) || type.isEmpty() || authorizedProfiles.contains(type)) {
++                        //CMS.debug(method + "token type allowed");
++                        retTotal++;
++                        response.addEntry(createActivityData(record));
++                    } else {
++                        CMS.debug(method + "token type restricted; adding 'restricted' record");
++                        response.addEntry(createRestrictedActivityData());
++                    }
++                } //for
+             }
+-
+-            response.addEntry(createActivityData(record));
++        } else { //authorizedProfiles null; no permission
++            CMS.debug(method + "authorized profiles is null");
+         }
+ 
++        CMS.debug(method + "retTotal = " + retTotal);
+         response.setTotal(total);
+     }
+ 
+@@ -164,44 +228,120 @@ public class ActivityService extends PKIService implements ActivityResource {
+             Integer size,
+             ActivityCollection response) throws Exception {
+ 
++        String method = "ActivityService.retrieveActivitiesWithoutVLV: ";
+         // search without VLV
+-        Iterator<ActivityRecord> activities = database.findRecords(filter).iterator();
++	List<ActivityRecord> activities = (List<ActivityRecord>) database.findRecords(filter);
++	int total = activities.size();
++        CMS.debug(method + "total: " + total);
+ 
+-        // TODO: sort results by date in reverse order
++        List<String> authorizedProfiles = getAuthorizedProfiles();
+ 
++        int retTotal = 0; // debugging only
+         int i = 0;
+ 
+-        // skip to the start of the page
+-        for (; i < start && activities.hasNext(); i++)
+-            activities.next();
+-
+         // return entries in the requested page
+-        for (; i < start + size && activities.hasNext(); i++) {
+-            ActivityRecord record = activities.next();
+-            response.addEntry(createActivityData(record));
++        if (authorizedProfiles != null) {
++            if (authorizedProfiles.contains(UserResource.ALL_PROFILES)) {
++                for (i= start; i < start + size && i < total; i++) {
++                    ActivityRecord record = activities.get(i);
++
++                    //CMS.debug(method + "record.tokenType="+ record.getType());
++                    response.addEntry(createActivityData(record));
++                    retTotal++;
++                }
++            } else { // not authorized for all profiles
++                for (i= start; i < start + size && i < total; i++) {
++                    ActivityRecord record = activities.get(i);
++                    //CMS.debug(method + "record.ID="+ record.getId());
++                    // On some rare occasions, some activities don't have
++                    // their token type filled in. It is therefore necessary
++                    // to get it from the token record directly.
++                    String type = record.getType();
++                    //CMS.debug(method + "record.tokenType="+ type);
++                    if ((type == null) || type.isEmpty()) {
++                        CMS.debug(method + "record.tokenType null...getting from token record");
++                        String tokenID = record.getTokenID();
++                        if ((tokenID != null) && !tokenID.isEmpty()) {
++                            TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
++                            TokenDatabase t_database = subsystem.getTokenDatabase();
++                            TokenRecord t_record = t_database.getRecord(tokenID);
++                            if (t_record != null)
++                                type = t_record.getType();
++                        }
++                    }
++                    //CMS.debug(method + "type="+ type);
++
++                    if ((type == null) || type.isEmpty() || authorizedProfiles.contains(type)) {
++                        retTotal++;
++                        response.addEntry(createActivityData(record));
++                    } else {
++                        //CMS.debug(method + "token type not allowed: " + type +
++                        //        "; adding 'restricted' record");
++                        response.addEntry(createRestrictedActivityData());
++                    }
++                }
++            }
++        } else { //authorizedProfiles null; no permission
++            CMS.debug(method + "authorized profiles is null");
+         }
+ 
+-        // count the total entries
+-        for (; activities.hasNext(); i++) activities.next();
+-        response.setTotal(i);
++        CMS.debug(method + "retTotal = " + retTotal);
++        response.setTotal(total);
+     }
+ 
+     @Override
+     public Response getActivity(String activityID) {
+ 
++        String method = "ActivityService.getActivity: ";
++        String msg = "";
+         if (activityID == null) throw new BadRequestException("Activity ID is null.");
+ 
+-        CMS.debug("ActivityService.getActivity(\"" + activityID + "\")");
++        CMS.debug(method + "(\"" + activityID + "\")");
+ 
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TPSSubsystem subsystem = (TPSSubsystem)CMS.getSubsystem(TPSSubsystem.ID);
+             ActivityDatabase database = subsystem.getActivityDatabase();
++            ActivityRecord record = database.getRecord(activityID);
++            if (record == null) {
++                CMS.debug(method + "record not found");
++                throw new PKIException(method + "record not found");
++            }
++            String type = record.getType();
+ 
+-            return createOKResponse(createActivityData(database.getRecord(activityID)));
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type)) {
++                msg = "token type restricted: " + type;
++                CMS.debug(method + msg);
++                throw new PKIException(msg);
++            }
++            return createOKResponse(createActivityData(record));
+ 
+         } catch (Exception e) {
+             CMS.debug(e);
+             throw new PKIException(e.getMessage());
+         }
+     }
++
++    /*
++     * returns a list of TPS profiles allowed for the current user
++     */
++    List<String> getAuthorizedProfiles()
++           throws Exception {
++        String method = "ActivityService.getAuthorizedProfiles: ";
++        /*
++        String userID = servletRequest.getUserPrincipal().getName();
++        CMS.debug(method + "principal name: " + userID);
++        IUGSubsystem userGroupManager = (IUGSubsystem) CMS.getSubsystem(CMS.SUBSYSTEM_UG);
++        IUser user = userGroupManager.getUser(userID);
++        */
++        PKIPrincipal pkiPrincipal = (PKIPrincipal) servletRequest.getUserPrincipal();
++        IUser user = pkiPrincipal.getUser();
++        return user.getTpsProfiles();
++    }
+ }
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/ProfileService.java b/base/tps/src/org/dogtagpki/server/tps/rest/ProfileService.java
+index 71bf9ad..de2691c 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/ProfileService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/ProfileService.java
+@@ -22,8 +22,11 @@ import java.io.UnsupportedEncodingException;
+ import java.net.URI;
+ import java.net.URLEncoder;
+ import java.security.Principal;
++import java.util.ArrayList;
++import java.util.Collection;
+ import java.util.HashMap;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Map;
+ import java.util.regex.Pattern;
+ 
+@@ -35,16 +38,21 @@ import org.dogtagpki.server.tps.config.ProfileDatabase;
+ import org.dogtagpki.server.tps.config.ProfileRecord;
+ import org.jboss.resteasy.plugins.providers.atom.Link;
+ 
++import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.base.BadRequestException;
+ import com.netscape.certsrv.base.ForbiddenException;
+ import com.netscape.certsrv.base.PKIException;
++import com.netscape.certsrv.base.UserNotFoundException;
+ import com.netscape.certsrv.common.Constants;
+ import com.netscape.certsrv.logging.AuditEvent;
+ import com.netscape.certsrv.logging.ILogger;
+ import com.netscape.certsrv.tps.profile.ProfileCollection;
+ import com.netscape.certsrv.tps.profile.ProfileData;
+ import com.netscape.certsrv.tps.profile.ProfileResource;
++import com.netscape.certsrv.usrgrp.IUGSubsystem;
++import com.netscape.certsrv.usrgrp.IUser;
++import com.netscape.certsrv.user.UserResource;
+ import com.netscape.cms.servlet.base.SubsystemService;
+ 
+ /**
+@@ -94,30 +102,51 @@ public class ProfileService extends SubsystemService implements ProfileResource
+             throw new BadRequestException("Filter is too short.");
+         }
+ 
+-        start = start == null ? 0 : start;
+-        size = size == null ? DEFAULT_SIZE : size;
+-
++        CMS.debug("ProfileService.j.findProfiles filter: " + filter);
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++
++            start = start == null ? 0 : start;
++            size = size == null ? DEFAULT_SIZE : size;
++
+             TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+             ProfileDatabase database = subsystem.getProfileDatabase();
+ 
+-            Iterator<ProfileRecord> profiles = database.findRecords(filter).iterator();
++            Collection<ProfileRecord> profiles = new ArrayList<>();
++            if (authorizedProfiles != null) {
++
++                Collection<ProfileRecord> filteredProfiles = database.findRecords(filter);
++
++                if (authorizedProfiles.contains(UserResource.ALL_PROFILES)) {
++                    CMS.debug("ProfileService: User allowed to access all profiles");
++                    profiles.addAll(filteredProfiles);
++
++                } else {
++                    for (ProfileRecord profile : filteredProfiles) {
++                        if (authorizedProfiles.contains(profile.getID())) {
++                            CMS.debug("ProfileService: User allowed to access profile " + profile.getID());
++                            profiles.add(profile);
++                        }
++                    }
++                }
++            }
++            Iterator<ProfileRecord> profileIterator = profiles.iterator();
+ 
+             ProfileCollection response = new ProfileCollection();
+             int i = 0;
+ 
+             // skip to the start of the page
+-            for (; i < start && profiles.hasNext(); i++)
+-                profiles.next();
++            for (; i < start && profileIterator.hasNext(); i++)
++                profileIterator.next();
+ 
+             // return entries up to the page size
+-            for (; i < start + size && profiles.hasNext(); i++) {
+-                response.addEntry(createProfileData(profiles.next()));
++            for (; i < start + size && profileIterator.hasNext(); i++) {
++                response.addEntry(createProfileData(profileIterator.next()));
+             }
+ 
+             // count the total entries
+-            for (; profiles.hasNext(); i++)
+-                profiles.next();
++            for (; profileIterator.hasNext(); i++)
++                profileIterator.next();
+             response.setTotal(i);
+ 
+             if (start > 0) {
+@@ -145,23 +174,33 @@ public class ProfileService extends SubsystemService implements ProfileResource
+     @Override
+     public Response getProfile(String profileID) {
+ 
++        String method = "ProfileService.getProfile: ";
++        String msg = "";
+         if (profileID == null)
+             throw new BadRequestException("Profile ID is null.");
+ 
+-        CMS.debug("ProfileService.getProfile(\"" + profileID + "\")");
++        CMS.debug(method + "(\"" + profileID + "\")");
+ 
++        ProfileRecord profileRecord = null;
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if ((authorizedProfiles== null) || ((authorizedProfiles != null) && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(profileID))) {
++                msg = "profile record restricted for profileID:" + profileID;
++                CMS.debug(method + msg);
++
++                throw new PKIException(msg);
++            }
+             TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+             ProfileDatabase database = subsystem.getProfileDatabase();
+-
+-            return createOKResponse(createProfileData(database.getRecord(profileID)));
++            profileRecord = database.getRecord(profileID);
++            return createOKResponse(createProfileData(profileRecord));
+ 
+         } catch (PKIException e) {
+-            CMS.debug("ProfileService: " + e);
++            CMS.debug(method + e);
+             throw e;
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+             throw new PKIException(e);
+         }
+     }
+@@ -231,6 +270,7 @@ public class ProfileService extends SubsystemService implements ProfileResource
+     @Override
+     public Response updateProfile(String profileID, ProfileData profileData) {
+         String method = "ProfileService.updateProfile";
++        String msg = "";
+ 
+         if (profileID == null) {
+             auditConfigTokenGeneral(ILogger.FAILURE, method, null,
+@@ -244,7 +284,7 @@ public class ProfileService extends SubsystemService implements ProfileResource
+             throw new BadRequestException("Profile data is null.");
+         }
+ 
+-        CMS.debug("ProfileService.updateProfile(\"" + profileID + "\")");
++        CMS.debug(method + "(\"" + profileID + "\")");
+ 
+         Map<String, String> properties = profileData.getProperties();
+         for (String name : properties.keySet()) {
+@@ -254,6 +294,14 @@ public class ProfileService extends SubsystemService implements ProfileResource
+         }
+ 
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if ((authorizedProfiles== null) || ((authorizedProfiles != null) && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(profileID))) {
++                msg = "profile record restricted for profileID:" + profileID;
++                CMS.debug(method + msg);
++
++                throw new PKIException(msg);
++            }
++
+             TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+             ProfileDatabase database = subsystem.getProfileDatabase();
+ 
+@@ -306,12 +354,12 @@ public class ProfileService extends SubsystemService implements ProfileResource
+             return createOKResponse(profileData);
+ 
+         } catch (PKIException e) {
+-            CMS.debug("ProfileService: " + e);
++            CMS.debug(method + e);
+             auditTPSProfileChange(ILogger.FAILURE, method, profileID, profileData.getProperties(), e.toString());
+             throw e;
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+             auditTPSProfileChange(ILogger.FAILURE, method, profileID, profileData.getProperties(), e.toString());
+             throw new PKIException(e);
+         }
+@@ -319,7 +367,8 @@ public class ProfileService extends SubsystemService implements ProfileResource
+ 
+     @Override
+     public Response changeStatus(String profileID, String action) {
+-        String method = "ProfileService.changeStatus";
++        String method = "ProfileService.changeStatus: ";
++        String msg = "";
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+         if (profileID == null) {
+@@ -336,9 +385,17 @@ public class ProfileService extends SubsystemService implements ProfileResource
+         }
+         auditModParams.put("Action", action);
+ 
+-        CMS.debug("ProfileService.changeStatus(\"" + profileID + "\", \"" + action + "\")");
++        CMS.debug(method + "(\"" + profileID + "\", \"" + action + "\")");
+ 
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if ((authorizedProfiles== null) || ((authorizedProfiles!= null) && (!authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(profileID)))) {
++                msg = "profile record restricted for profileID:" + profileID;
++                CMS.debug(method + msg);
++
++                throw new PKIException(msg);
++            }
++
+             TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+             ProfileDatabase database = subsystem.getProfileDatabase();
+ 
+@@ -424,13 +481,13 @@ public class ProfileService extends SubsystemService implements ProfileResource
+             return createOKResponse(profileData);
+ 
+         } catch (PKIException e) {
+-            CMS.debug("ProfileService: " + e);
++            CMS.debug(method + e);
+             auditConfigTokenGeneral(ILogger.FAILURE, method,
+                     auditModParams, e.toString());
+             throw e;
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+             auditConfigTokenGeneral(ILogger.FAILURE, method,
+                     auditModParams, e.toString());
+             throw new PKIException(e);
+@@ -439,7 +496,8 @@ public class ProfileService extends SubsystemService implements ProfileResource
+ 
+     @Override
+     public Response removeProfile(String profileID) {
+-        String method = "ProfileService.removeProfile";
++        String method = "ProfileService.removeProfile: ";
++        String msg = "";
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+         if (profileID == null) {
+@@ -449,9 +507,10 @@ public class ProfileService extends SubsystemService implements ProfileResource
+         }
+         auditModParams.put("profileID", profileID);
+ 
+-        CMS.debug("ProfileService.removeProfile(\"" + profileID + "\")");
++        CMS.debug(method + "(\"" + profileID + "\")");
+ 
+         try {
++
+             TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+             ProfileDatabase database = subsystem.getProfileDatabase();
+ 
+@@ -471,13 +530,13 @@ public class ProfileService extends SubsystemService implements ProfileResource
+             return createNoContentResponse();
+ 
+         } catch (PKIException e) {
+-            CMS.debug("ProfileService: " + e);
++            CMS.debug(method + e);
+             auditTPSProfileChange(ILogger.FAILURE, method, profileID,
+                     auditModParams, e.toString());
+             throw e;
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+             auditTPSProfileChange(ILogger.FAILURE, method, profileID,
+                     auditModParams, e.toString());
+             throw new PKIException(e);
+@@ -485,6 +544,19 @@ public class ProfileService extends SubsystemService implements ProfileResource
+     }
+ 
+     /*
++     * returns a list of TPS profiles allowed for the current user
++     */
++    List<String> getAuthorizedProfiles()
++           throws Exception {
++        String method = "ProfileService.getAuthorizedProfiles: ";
++
++        PKIPrincipal pkiPrincipal = (PKIPrincipal) servletRequest.getUserPrincipal();
++        IUser user = pkiPrincipal.getUser();
++
++        return user.getTpsProfiles();
++    }
++
++    /*
+      * Service can be any of the methods offered
+      */
+     public void auditTPSProfileChange(String status, String service, String profileID, Map<String, String> params,
+@@ -498,6 +570,7 @@ public class ProfileService extends SubsystemService implements ProfileResource
+                 profileID,
+                 auditor.getParamString(params),
+                 info);
++        // CMS.debug("auditTPSProfileChange: " + msg);
+         signedAuditLogger.log(msg);
+     }
+ 
+diff --git a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+index 9dd3ce1..a7a6022 100644
+--- a/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
++++ b/base/tps/src/org/dogtagpki/server/tps/rest/TokenService.java
+@@ -23,8 +23,10 @@ import java.net.URI;
+ import java.net.URLEncoder;
+ import java.util.ArrayList;
+ import java.util.Collection;
++import java.util.Date;
+ import java.util.HashMap;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Map;
+ import java.util.MissingResourceException;
+ import java.util.ResourceBundle;
+@@ -39,6 +41,7 @@ import org.dogtagpki.server.tps.dbs.TokenRecord;
+ import org.dogtagpki.server.tps.engine.TPSEngine;
+ import org.jboss.resteasy.plugins.providers.atom.Link;
+ 
++import com.netscape.cms.realm.PKIPrincipal;
+ import com.netscape.certsrv.apps.CMS;
+ import com.netscape.certsrv.base.BadRequestException;
+ import com.netscape.certsrv.base.IConfigStore;
+@@ -53,6 +56,9 @@ import com.netscape.certsrv.tps.token.TokenData;
+ import com.netscape.certsrv.tps.token.TokenData.TokenStatusData;
+ import com.netscape.certsrv.tps.token.TokenResource;
+ import com.netscape.certsrv.tps.token.TokenStatus;
++import com.netscape.certsrv.user.UserResource;
++import com.netscape.certsrv.usrgrp.IUGSubsystem;
++import com.netscape.certsrv.usrgrp.IUser;
+ import com.netscape.cms.servlet.base.SubsystemService;
+ 
+ import netscape.ldap.LDAPException;
+@@ -229,6 +235,28 @@ public class TokenService extends SubsystemService implements TokenResource {
+         return tokenData;
+     }
+ 
++    public TokenData createRestrictedTokenData() throws Exception {
++
++        TokenData tokenData = new TokenData();
++        tokenData.setID("<restricted>");
++        tokenData.setTokenID("<restricted>");
++        tokenData.setUserID("<restricted>");
++        tokenData.setType("<restricted>");
++
++        TokenStatusData statusData = new TokenStatusData();
++        statusData.name = TokenStatus.valueOf(null);
++        statusData.label = "<restricted>";
++        tokenData.setStatus(statusData);
++
++        tokenData.setAppletID("<restricted>");
++        tokenData.setKeyInfo("<restricted>");
++        tokenData.setPolicy("<restricted>");
++        tokenData.setCreateTimestamp(new Date(0L));
++        tokenData.setModifyTimestamp(new Date(0L));
++
++        return tokenData;
++    }
++
+     @Override
+     public Response findTokens(
+             String filter,
+@@ -311,24 +339,48 @@ public class TokenService extends SubsystemService implements TokenResource {
+             Integer size,
+             TokenCollection response) throws Exception {
+ 
++        String method = "TokenService.retrieveTokensWithVLV: ";
+         // search with VLV sorted by date in reverse order
+         IDBVirtualList<TokenRecord> list = database.findRecords(
+                 null, null, new String[] { "-modifyTimestamp", "-createTimestamp" }, size);
+ 
++        List<String> authorizedProfiles = getAuthorizedProfiles();
++
+         int total = list.getSize();
++        int retTotal = 0; //debugging only
+ 
+         // return entries in the requested page
+-        for (int i = start; i < start + size && i < total; i++) {
+-            TokenRecord record = list.getElementAt(i);
++        if (authorizedProfiles != null) {
++            if (authorizedProfiles.contains(UserResource.ALL_PROFILES)) {
++                for (int i = start; i < start + size && i < total; i++) {
++                    TokenRecord record = list.getElementAt(i);
+ 
+-            if (record == null) {
+-                CMS.debug("TokenService: Token record not found");
+-                throw new PKIException("Token record not found");
++                    response.addEntry(createTokenData(record));
++                    retTotal++;
++                }
++            } else { // not authorized for all profiles
++                for (int i = start; i < start + size && i < total; i++) {
++                    TokenRecord record = list.getElementAt(i);
++                    //CMS.debug(method + "record.ID="+ record.getId());
++
++                    String type = record.getType();
++                    //CMS.debug(method + "record.tokenType="+ type;
++                    if ((type == null) || type.isEmpty() || authorizedProfiles.contains(type)) {
++                        //CMS.debug(method + "token type allowed");
++                        retTotal++;
++                        response.addEntry(createTokenData(record));
++                    } else {
++                        //CMS.debug(method + "token type restricted: " + type +
++                        //        "; adding 'restricted' record");
++                        response.addEntry(createRestrictedTokenData());
++                    }
++                } //for
+             }
+-
+-            response.addEntry(createTokenData(record));
++        } else { //authorizedProfiles null; no permission
++            CMS.debug(method + "authorized profiles is null");
+         }
+ 
++        CMS.debug(method + "retTotal = " + retTotal);
+         response.setTotal(total);
+     }
+ 
+@@ -340,44 +392,84 @@ public class TokenService extends SubsystemService implements TokenResource {
+             Integer size,
+             TokenCollection response) throws Exception {
+ 
+-        // search without VLV
+-        Iterator<TokenRecord> tokens = database.findRecords(filter, attributes).iterator();
++        String method = "TokenService.retrieveTokensWithoutVLV: ";
+ 
+-        // TODO: sort results by date in reverse order
++	List<TokenRecord> tokens = (List<TokenRecord>) database.findRecords(filter);
++	int total = tokens.size();
++	CMS.debug(method + "total: " + total);
+ 
+-        int i = 0;
++        List<String> authorizedProfiles = getAuthorizedProfiles();
+ 
+-        // skip to the start of the page
+-        for (; i < start && tokens.hasNext(); i++)
+-            tokens.next();
++        int retTotal = 0; //debugging only
++        int i = 0;
+ 
+         // return entries in the requested page
+-        for (; i < start + size && tokens.hasNext(); i++) {
+-            TokenRecord record = tokens.next();
+-
+-            response.addEntry(createTokenData(record));
++        if (authorizedProfiles != null) {
++            if (authorizedProfiles.contains(UserResource.ALL_PROFILES)) {
++                for (i=start; i < start + size && i < total; i++) {
++                    TokenRecord record = tokens.get(i);
++
++                    //CMS.debug(method + "record.tokenType="+ record.getType());
++                    response.addEntry(createTokenData(record));
++                    retTotal++;
++                }
++            } else { // not authorized for all profiles
++                for (i=start; i < start + size && i < total; i++) {
++                    TokenRecord record = tokens.get(i);
++                    //CMS.debug(method + "record.ID="+ record.getId());
++                    String type = record.getType();
++                    //CMS.debug(method + "record.tokenType="+ type;
++                    if ((type == null) || type.isEmpty() || authorizedProfiles.contains(type)) {
++                        //CMS.debug(method + "token type allowed");
++                        retTotal++;
++                        response.addEntry(createTokenData(record));
++                    } else {
++                        //CMS.debug(method + "token type not allowed: " + type +
++                        //        "; adding 'restricted' record");
++                        response.addEntry(createRestrictedTokenData());
++                    }
++                }
++            }
++        } else { //authorizedProfiles null; no permission
++            CMS.debug(method + "authorized profiles is null");
+         }
+ 
+-        // count the total entries
+-        for (; tokens.hasNext(); i++)
+-            tokens.next();
++        CMS.debug(method + "retTotal = " + retTotal);
+ 
+-        response.setTotal(i);
++        response.setTotal(total);
+     }
+ 
+     @Override
+     public Response getToken(String tokenID) {
+-
++        String method = "TokenService.getToken: ";
++        String msg = "";
+         if (tokenID == null)
+             throw new BadRequestException("Token ID is null.");
+ 
+-        CMS.debug("TokenService.getToken(\"" + tokenID + "\")");
++        CMS.debug(method + "(\"" + tokenID + "\")");
+ 
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+             TokenDatabase database = subsystem.getTokenDatabase();
++            TokenRecord record = database.getRecord(tokenID);
++            if (record == null) {
++                msg = "Token record not found";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++            String type = record.getType();
++            if ((type == null) || type.isEmpty() || authorizedProfiles.contains(UserResource.ALL_PROFILES) || authorizedProfiles.contains(type))
+ 
+-            return createOKResponse(createTokenData(database.getRecord(tokenID)));
++                return createOKResponse(createTokenData(record));
++            else
++                throw new PKIException(method + "Token record restricted");
+ 
+         } catch (EDBException e) {
+             Throwable t = e.getCause();
+@@ -397,7 +489,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+     @Override
+     public Response addToken(TokenData tokenData) {
+-        String method = "TokenService.addToken";
++        String method = "TokenService.addToken: ";
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+         if (tokenData == null) {
+@@ -410,7 +502,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+         String tokenID = tokenData.getTokenID();
+         auditModParams.put("tokenID", tokenID);
+ 
+-        CMS.debug("TokenService.addToken(\"" + tokenID + "\")");
++        CMS.debug(method + "(\"" + tokenID + "\")");
+ 
+         String remoteUser = servletRequest.getRemoteUser();
+         String ipAddress = servletRequest.getRemoteAddr();
+@@ -451,7 +543,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             return createCreatedResponse(tokenData, tokenData.getLink().getHref());
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+ 
+             msg = msg + ": " + e.getMessage();
+             subsystem.tdb.tdbActivity(ActivityDatabase.OP_ADD, tokenRecord,
+@@ -481,7 +573,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+     @Override
+     public Response replaceToken(String tokenID, TokenData tokenData) {
+-        String method = "TokenService.replaceToken";
++        String method = "TokenService.replaceToken: ";
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+         if (tokenID == null) {
+@@ -495,7 +587,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             throw new BadRequestException("Token data is null.");
+         }
+ 
+-        CMS.debug("TokenService.replaceToken(\"" + tokenID + "\")");
++        CMS.debug(method +"(\"" + tokenID + "\")");
+ 
+         String remoteUser = servletRequest.getRemoteUser();
+         String ipAddress = servletRequest.getRemoteAddr();
+@@ -528,7 +620,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             return createOKResponse(tokenData);
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+ 
+             msg = msg + ": " + e.getMessage();
+             subsystem.tdb.tdbActivity(ActivityDatabase.OP_TOKEN_MODIFY, tokenRecord,
+@@ -559,7 +651,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+     @Override
+     public Response modifyToken(String tokenID, TokenData tokenData) {
+-        String method = "TokenService.modifyToken";
++        String method = "TokenService.modifyToken: ";
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+         if (tokenID == null) {
+@@ -575,7 +667,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             throw e;
+         }
+ 
+-        CMS.debug("TokenService.modifyToken(\"" + tokenID + "\")");
++        CMS.debug(method + "(\"" + tokenID + "\")");
+ 
+         String remoteUser = servletRequest.getRemoteUser();
+         String ipAddress = servletRequest.getRemoteAddr();
+@@ -584,11 +676,29 @@ public class TokenService extends SubsystemService implements TokenResource {
+         TokenRecord tokenRecord = null;
+         String msg = "modify token";
+         try {
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
+             TokenDatabase database = subsystem.getTokenDatabase();
+ 
+             // get existing record
+             tokenRecord = database.getRecord(tokenID);
+ 
++            if (tokenRecord == null) {
++                CMS.debug(method + "Token record not found");
++                throw new PKIException(method + "Token record not found");
++            }
++            String type = tokenRecord.getType();
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type)) {
++                CMS.debug(method + "token record restricted");
++
++                throw new PKIException("token record restricted");
++            }
++
+             // update user ID if specified
+             String userID = tokenData.getUserID();
+             if (userID != null) {
+@@ -622,7 +732,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             return createOKResponse(tokenData);
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+ 
+             msg = msg + ": " + e.getMessage();
+             subsystem.tdb.tdbActivity(ActivityDatabase.OP_TOKEN_MODIFY, tokenRecord,
+@@ -653,7 +763,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+     @Override
+     public Response changeTokenStatus(String tokenID, TokenStatus tokenStatus) {
+-        String method = "TokenService.changeTokenStatus";
++        String method = "TokenService.changeTokenStatus: ";
+         CMS.debug(method + "begins: with tokenStatus=" + tokenStatus.getName());
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+@@ -662,8 +772,12 @@ public class TokenService extends SubsystemService implements TokenResource {
+                     "Token ID is null.");
+             throw new BadRequestException("Token ID is null.");
+         }
+-
+         auditModParams.put("tokenID", tokenID);
++
++        TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
++        TokenDatabase database = null;
++        TokenRecord tokenRecord = null;
++
+         if (tokenStatus == null) {
+             auditConfigTokenGeneral(ILogger.FAILURE, method, null,
+                     "Token state is null.");
+@@ -671,39 +785,55 @@ public class TokenService extends SubsystemService implements TokenResource {
+         }
+         auditModParams.put("tokenStatus", tokenStatus.toString());
+ 
+-        CMS.debug("TokenService.changeTokenStatus(\"" + tokenID + "\", \"" + tokenStatus + "\")");
++        CMS.debug(method + "(\"" + tokenID + "\", \"" + tokenStatus + "\")");
+ 
+         String remoteUser = servletRequest.getRemoteUser();
+         String ipAddress = servletRequest.getRemoteAddr();
+ 
+-        TPSSubsystem subsystem = (TPSSubsystem) CMS.getSubsystem(TPSSubsystem.ID);
+         // for auditing
+         TokenStatus oldStatus = null;
+         String oldReason = null;
+         TokenStatus newStatus = null;
+         String newReason = null;
+ 
+-        TokenRecord tokenRecord = null;
+         String msg = "change token status";
+         try {
+-            TokenDatabase database = subsystem.getTokenDatabase();
++            List<String> authorizedProfiles = getAuthorizedProfiles();
++            if (authorizedProfiles == null) {
++                msg = "authorizedProfiles null";
++                CMS.debug(method + msg);
++                throw new PKIException(method + msg);
++            }
++
++            database = subsystem.getTokenDatabase();
+ 
+             tokenRecord = database.getRecord(tokenID);
++            if (tokenRecord == null) {
++                CMS.debug(method + "Token record not found");
++                throw new PKIException(method + "Token record not found");
++            }
++            String type = tokenRecord.getType();
++            if ((type != null) && !type.isEmpty() && !authorizedProfiles.contains(UserResource.ALL_PROFILES) && !authorizedProfiles.contains(type)) {
++                CMS.debug(method + "token record restricted: " + type);
++
++                throw new PKIException("token record restricted");
++            }
+             TokenStatus currentTokenStatus = tokenRecord.getTokenStatus();
+-            CMS.debug("TokenService.changeTokenStatus(): current status: " + currentTokenStatus);
++            CMS.debug(method + " current status: " + currentTokenStatus);
+ 
+             oldStatus = tokenRecord.getTokenStatus();
+             oldReason = tokenRecord.getReason();
+             newStatus = tokenStatus;
+ 
+             if (currentTokenStatus == tokenStatus) {
+-                CMS.debug("TokenService.changeTokenStatus(): no status change, no activity log generated");
++                CMS.debug(method + " no status change, no activity log generated");
+ 
+                 TokenData tokenData = createTokenData(tokenRecord);
+                 return createOKResponse(tokenData);
+             }
+ 
+             msg = msg + " from " + currentTokenStatus + " to " + tokenStatus;
++            CMS.debug(method + msg);
+ 
+             // Check for invalid current status
+             if(!oldStatus.isValid()) {
+@@ -717,7 +847,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+             // make sure transition is allowed
+             if (!subsystem.isUITransitionAllowed(tokenRecord, tokenStatus)) {
+-                CMS.debug("TokenService.changeTokenStatus(): next status not allowed: " + tokenStatus);
++                CMS.debug(method + " next status not allowed: " + tokenStatus);
+                 Exception ex = new BadRequestException("Invalid token status transition");
+                 auditTokenStateChange(ILogger.FAILURE, oldStatus,
+                         newStatus, oldReason, newReason,
+@@ -725,7 +855,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+                 throw ex;
+             }
+ 
+-            CMS.debug("TokenService.changeTokenStatus(): next status allowed: " + tokenStatus);
++            CMS.debug(method + " next status allowed: " + tokenStatus);
+             // audit in setTokenStatus()
+             setTokenStatus(tokenRecord, tokenStatus, ipAddress, remoteUser, auditModParams);
+             database.updateRecord(tokenID, tokenRecord);
+@@ -738,7 +868,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             return createOKResponse(tokenData);
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+ 
+             msg = msg + ": " + e.getMessage();
+             subsystem.tdb.tdbActivity(ActivityDatabase.OP_TOKEN_STATUS_CHANGE, tokenRecord,
+@@ -772,7 +902,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+ 
+     @Override
+     public Response removeToken(String tokenID) {
+-        String method = "TokenService.removeToken";
++        String method = "TokenService.removeToken: ";
+         Map<String, String> auditModParams = new HashMap<String, String>();
+ 
+         if (tokenID == null) {
+@@ -782,7 +912,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             throw ex;
+         }
+ 
+-        CMS.debug("TokenService.removeToken(\"" + tokenID + "\")");
++        CMS.debug(method + "(\"" + tokenID + "\")");
+ 
+         String remoteUser = servletRequest.getRemoteUser();
+         String ipAddress = servletRequest.getRemoteAddr();
+@@ -795,7 +925,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             tokenRecord = database.getRecord(tokenID);
+ 
+             //delete all certs associated with this token
+-            CMS.debug("TokenService.removeToken: about to remove all certificates associated with the token first");
++            CMS.debug(method + "about to remove all certificates associated with the token first");
+             subsystem.tdb.tdbRemoveCertificatesByCUID(tokenRecord.getId());
+ 
+             database.removeRecord(tokenID);
+@@ -807,7 +937,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+             return createNoContentResponse();
+ 
+         } catch (Exception e) {
+-            CMS.debug(e);
++            CMS.debug(method + e);
+ 
+             msg = msg + ": " + e.getMessage();
+             subsystem.tdb.tdbActivity(ActivityDatabase.OP_DELETE, tokenRecord,
+@@ -837,11 +967,25 @@ public class TokenService extends SubsystemService implements TokenResource {
+     }
+ 
+     /*
++     * returns a list of TPS profiles allowed for the current user
++     */
++    List<String> getAuthorizedProfiles()
++           throws Exception {
++        String method = "TokenService.getAuthorizedProfiles: ";
++
++        PKIPrincipal pkiPrincipal = (PKIPrincipal) servletRequest.getUserPrincipal();
++        IUser user = pkiPrincipal.getUser();
++
++        return user.getTpsProfiles();
++    }
++
++    /*
+      * Service can be any of the methods offered
+      */
+     public void auditConfigTokenRecord(String status, String service, String tokenID, Map<String, String> params,
+             String info) {
+ 
++        //CMS.debug("auditTokenStateChange1: ");
+         String msg = CMS.getLogMessage(
+                 AuditEvent.CONFIG_TOKEN_RECORD,
+                 servletRequest.getUserPrincipal().getName(),
+@@ -850,6 +994,7 @@ public class TokenService extends SubsystemService implements TokenResource {
+                 tokenID,
+                 auditor.getParamString(params),
+                 info);
++        //CMS.debug("auditConfigTokenRecord: " + msg);
+         signedAuditLogger.log(msg);
+     }
+ 
+@@ -859,16 +1004,18 @@ public class TokenService extends SubsystemService implements TokenResource {
+     public void auditTokenStateChange(String status, TokenStatus oldState, TokenStatus newState, String oldReason,
+             String newReason, Map<String, String> params, String info) {
+ 
++        //CMS.debug("auditTokenStateChange2: ");
+         String msg = CMS.getLogMessage(
+                 AuditEvent.TOKEN_STATE_CHANGE,
+                 servletRequest.getUserPrincipal().getName(),
+                 status,
+-                oldState.toString(),
++                (oldState==null)? "":oldState.toString(),
+                 oldReason,
+-                newState.toString(),
++                (newState==null)? "":newState.toString(),
+                 newReason,
+                 auditor.getParamString(params),
+                 info);
++        //CMS.debug("auditTokenStateChange: " + msg);
+         signedAuditLogger.log(msg);
+     }
+ }
+-- 
+1.8.3.1
+
